@@ -168,6 +168,10 @@ pub struct Report {
     pub errors: Vec<String>,
     /// Not errors, but worth telling the user (e.g. where an edited folder copy was kept).
     pub notices: Vec<String>,
+    /// Tech names `set_active` left parked although wanted, because another mod of that name is
+    /// already in the mods folder (#421). Not an error: the name is on through that copy. The
+    /// Library rescans when it doesn't show that copy yet.
+    pub other_copies: Vec<String>,
 }
 
 /// Result of the link-repair pass — how many copy-projections were deduped into links

@@ -52,6 +52,23 @@ export function rowActive(mod: CopyRow, active: ReadonlySet<string>, shadowed: R
 }
 
 /**
+ * Whether a switch found a copy the Library doesn't show yet: set_active left a wanted name's
+ * archived copy parked because another copy is in the mods folder (`otherCopies`), and no row of
+ * that name is shown shadowed (the other copy arrived after the last scan). Then the rows are
+ * stale and the caller rescans, so the switched row doesn't show active.
+ * @param otherCopies what set_active reported
+ * @param mods the rows shown
+ * @param shadowed from shadowedCopies(mods)
+ */
+export function copiesNotShown(
+  otherCopies: readonly string[] | undefined,
+  mods: readonly CopyRow[],
+  shadowed: ReadonlyMap<string, unknown>,
+): boolean {
+  return (otherCopies ?? []).some((t) => !mods.some((m) => m.techName === t && shadowed.has(m.path)));
+}
+
+/**
  * Why a shadowed copy can't be turned on, for the refusal toast.
  * @param name the row's title
  * @param other the file or folder name of the copy in the mods folder

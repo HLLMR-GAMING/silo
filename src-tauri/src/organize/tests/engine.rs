@@ -209,6 +209,11 @@ fn activation_never_links_a_second_copy_of_a_loaded_tech_name() {
     let rep = set_active(&conn, &layout, &on);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     assert_eq!((rep.changed, rep.skipped), (0, 1));
+    assert_eq!(
+        rep.other_copies,
+        vec!["FS25_Foo".to_string()],
+        "the Library is told why"
+    );
     assert!(base.join("FS25_Foo.zip").symlink_metadata().is_err());
     assert!(!db::load_organized(&conn, &key)[0].active);
     assert!(
@@ -221,6 +226,7 @@ fn activation_never_links_a_second_copy_of_a_loaded_tech_name() {
     let rep = set_active(&conn, &layout, &on);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     assert_eq!(rep.changed, 1);
+    assert!(rep.other_copies.is_empty());
     assert!(base.join("FS25_Foo.zip").is_file());
     assert!(db::load_organized(&conn, &key)[0].active);
 

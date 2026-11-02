@@ -96,6 +96,8 @@ export interface OrganizeReport {
   errors: string[];
   /** Not errors, but worth telling the user (e.g. where an edited folder copy was kept). */
   notices: string[];
+  /** set_active only: names left parked because another copy of the name is in the mods folder (#421). */
+  otherCopies?: string[];
 }
 
 /** Provenance verdict of comparing an installed mod to its canonical build. */

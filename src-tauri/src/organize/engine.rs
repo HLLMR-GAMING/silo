@@ -178,6 +178,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 .get_or_insert_with(|| crate::scan::root_tech_names(root))
                 .contains(&row.tech_name);
         if other_copy {
+            rep.other_copies.push(row.tech_name.clone());
             if row.active {
                 match db::set_organized_active(conn, &key, &row.tech_name, false) {
                     Ok(()) => rep.changed += 1,
