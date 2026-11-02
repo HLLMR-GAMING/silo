@@ -1912,33 +1912,109 @@ mod layout_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// #419 repro: an organized mod whose mods-folder entry FS25 can't open (a link to a folder
-    /// that's gone, a plain file where a folder mod should be, a folder where a zip should be)
-    /// is not active in the scan: it shows parked, which is what FS25 loads.
+    /// The one row a scan of `mods` gives archived mod `tech` (#419).
+    fn archived_row(mods: &Path, arch: &Path, tech: &str) -> ModEntry {
+        let out = scan_one(mods, arch);
+        let rows: Vec<_> = out
+            .result
+            .mods
+            .into_iter()
+            .filter(|m| m.tech_name == tech)
+            .collect();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].organized, "{:?}", rows[0]);
+        rows[0].clone()
+    }
+
+    /// #419: a folder link at an archived mod's name scans active while its target is there,
+    /// and parked once the target is gone (the link itself still in the mods folder). The
+    /// target is a copy outside the archive (an old archive whose drive went away), so the
+    /// archived copy stays and still has its row. `link` makes the folder link.
+    fn a_link_that_loses_its_target_turns_parked(
+        tag: &str,
+        link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+    ) {
+        let base = fresh(tag);
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        let old = base.join("old");
+        std::fs::create_dir_all(&mods).unwrap();
+        moddesc_dir(&arch.join("Tools/FS25_Linked"), "Archived");
+        moddesc_dir(&old.join("FS25_Linked"), "Old archive");
+        let entry = mods.join("FS25_Linked");
+        link(&old.join("FS25_Linked"), &entry).unwrap();
+        assert!(archived_row(&mods, &arch, "FS25_Linked").active);
+
+        std::fs::remove_dir_all(&old).unwrap();
+        let meta = entry.symlink_metadata().expect("the link is still there");
+        assert!(meta.file_type().is_symlink(), "{meta:?}");
+        assert!(entry.metadata().is_err(), "the link reaches nothing");
+        assert!(!archived_row(&mods, &arch, "FS25_Linked").active);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
     #[test]
-    fn an_entry_fs25_cant_open_leaves_the_archived_mod_parked() {
-        let base = fresh("broken_entry");
+    fn a_junction_that_loses_its_target_leaves_the_archived_mod_parked() {
+        a_link_that_loses_its_target_turns_parked("lost_junction", |src, link| {
+            crate::organize::junction_to(src, link)
+        });
+    }
+
+    #[cfg(windows)]
+    fn symlink_dir(src: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(src, link)
+    }
+    #[cfg(unix)]
+    fn symlink_dir(src: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(src, link)
+    }
+
+    #[test]
+    fn a_symlink_that_loses_its_target_leaves_the_archived_mod_parked() {
+        // A symlink needs Developer Mode (or admin) on Windows: skipped where it can't be made.
+        let probe = fresh("symlink_probe");
+        let usable = symlink_dir(&probe, &probe.join("l")).is_ok();
+        let _ = std::fs::remove_dir_all(&probe);
+        if !usable {
+            eprintln!("skipped: symlinks can't be made here");
+            return;
+        }
+        a_link_that_loses_its_target_turns_parked("lost_symlink", symlink_dir);
+    }
+
+    /// #419: an entry FS25 can't open at an archived mod's name leaves that mod parked: a plain
+    /// file where a folder mod should be, or a folder without `modDesc.xml` where a zip should
+    /// be. Each is checked against a working projection first, so the mod was active. (A folder
+    /// *with* `modDesc.xml` at a zip's name is another mod, its own active row:
+    /// `a_folder_named_like_an_archived_zip_is_its_own_mod`.)
+    #[test]
+    fn an_entry_that_isnt_a_mod_leaves_the_archived_mod_parked() {
+        let base = fresh("not_a_mod");
         let mods = base.join("mods");
         let arch = base.join("arch");
         let cat = arch.join("Tools");
         std::fs::create_dir_all(&mods).unwrap();
         std::fs::create_dir_all(&cat).unwrap();
-        moddesc_dir(&cat.join("FS25_Dangling"), "Dangling");
-        let gone = base.join("gone");
-        std::fs::create_dir_all(&gone).unwrap();
-        crate::organize::link_dir_native(&gone, &mods.join("FS25_Dangling")).unwrap();
-        std::fs::remove_dir(&gone).unwrap();
-        moddesc_dir(&cat.join("FS25_PlainFile"), "PlainFile");
-        std::fs::write(mods.join("FS25_PlainFile"), b"x").unwrap();
-        moddesc_zip(&cat.join("FS25_EmptyDir.zip"), "EmptyDir");
-        std::fs::create_dir_all(mods.join("FS25_EmptyDir.zip")).unwrap();
 
-        let out = scan_one(&mods, &arch);
-        assert_eq!(out.result.mods.len(), 3, "{:?}", out.result.mods);
-        for m in &out.result.mods {
-            assert!(m.organized, "{}", m.tech_name);
-            assert!(!m.active, "{} shows active", m.tech_name);
-        }
+        // A folder mod: Silo's marked copy, then a plain file in its place.
+        moddesc_dir(&cat.join("FS25_Dir"), "Dir");
+        let dir = mods.join("FS25_Dir");
+        moddesc_dir(&dir, "Dir");
+        std::fs::write(dir.join(crate::organize::SILO_MARKER), b"silo\n").unwrap();
+        assert!(archived_row(&mods, &arch, "FS25_Dir").active);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(&dir, b"x").unwrap();
+        assert!(!archived_row(&mods, &arch, "FS25_Dir").active);
+
+        // A zip mod: a hardlink, then a folder without modDesc.xml in its place.
+        moddesc_zip(&cat.join("FS25_Zip.zip"), "Zip");
+        let zip = mods.join("FS25_Zip.zip");
+        std::fs::hard_link(cat.join("FS25_Zip.zip"), &zip).unwrap();
+        assert!(archived_row(&mods, &arch, "FS25_Zip").active);
+        std::fs::remove_file(&zip).unwrap();
+        std::fs::create_dir_all(&zip).unwrap();
+        assert!(!archived_row(&mods, &arch, "FS25_Zip").active);
         let _ = std::fs::remove_dir_all(&base);
     }
 }
