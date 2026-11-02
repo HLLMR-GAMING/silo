@@ -1,6 +1,6 @@
 // Two library rows with one tech name (#421): only the copy in the mods folder shows active.
 import { describe, expect, it } from "vitest";
-import { activeTechNames, copiesNotShown, rowActive, shadowedCopies, shadowedText } from "./shadowedCopies";
+import { activeTechNames, copiesMayHaveMoved, rowActive, shadowedCopies, shadowedText } from "./shadowedCopies";
 
 const row = (techName: string, path: string, active: boolean) => ({ techName, path, active });
 
@@ -51,17 +51,16 @@ describe("activeTechNames", () => {
   });
 });
 
-describe("copiesNotShown", () => {
-  it("is true only for a name set_active kept parked that no row shows shadowed yet", () => {
-    const mods = [archived, loose, other];
-    const shadowed = shadowedCopies(mods);
-    expect(copiesNotShown(undefined, mods, shadowed)).toBe(false);
-    expect(copiesNotShown([], mods, shadowed)).toBe(false);
-    // Already shown: the archived FS25_A row is shadowed, so no rescan is needed.
-    expect(copiesNotShown(["FS25_A"], mods, shadowed)).toBe(false);
-    // The scan shown has only the parked archive: the other copy came since.
-    const before = [archived, other];
-    expect(copiesNotShown(["FS25_A"], before, shadowedCopies(before))).toBe(true);
+describe("copiesMayHaveMoved", () => {
+  it("is false only with no shadowed row and nothing set_active kept parked for another copy", () => {
+    const plain = [archived, other];
+    expect(copiesMayHaveMoved(undefined, shadowedCopies(plain))).toBe(false);
+    expect(copiesMayHaveMoved([], shadowedCopies(plain))).toBe(false);
+    // The other copy came since the last scan: set_active kept the archive parked for it.
+    expect(copiesMayHaveMoved(["FS25_A"], shadowedCopies(plain))).toBe(true);
+    // A row is shown shadowed: its other copy may have gone, and set_active then linked it.
+    const dup = [archived, loose, other];
+    expect(copiesMayHaveMoved([], shadowedCopies(dup))).toBe(true);
   });
 });
 

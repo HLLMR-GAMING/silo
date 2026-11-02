@@ -52,20 +52,21 @@ export function rowActive(mod: CopyRow, active: ReadonlySet<string>, shadowed: R
 }
 
 /**
- * Whether a switch found a copy the Library doesn't show yet: set_active left a wanted name's
- * archived copy parked because another copy is in the mods folder (`otherCopies`), and no row of
- * that name is shown shadowed (the other copy arrived after the last scan). Then the rows are
- * stale and the caller rescans, so the switched row doesn't show active.
+ * Whether, after a set_active, the rows may show the wrong copy of a name, so the caller reads
+ * the mods folder again before letting go of the write. Either a row is shown shadowed (its
+ * other copy may have gone since the last scan, and then set_active linked this one), or
+ * set_active left a wanted name's archived copy parked for another copy (`otherCopies`) that no
+ * row shows yet (it came since the last scan). With one row per name and no `otherCopies`
+ * (the usual case) it is false, and a clean switch needs no rescan.
  * @param otherCopies what set_active reported
- * @param mods the rows shown
  * @param shadowed from shadowedCopies(mods)
  */
-export function copiesNotShown(
+export function copiesMayHaveMoved(
   otherCopies: readonly string[] | undefined,
-  mods: readonly CopyRow[],
   shadowed: ReadonlyMap<string, unknown>,
 ): boolean {
-  return (otherCopies ?? []).some((t) => !mods.some((m) => m.techName === t && shadowed.has(m.path)));
+  if (shadowed.size > 0) return true;
+  return (otherCopies ?? []).length > 0;
 }
 
 /**

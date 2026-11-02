@@ -210,7 +210,7 @@
   import { onOtherDrive, runBulkSwitch } from "./lib/components/library/bulkSwitch";
   import { focusInside, returnFocusWhenHidden } from "./lib/components/library/focusReturn.svelte";
   import { fixedOnText, isUnparkable, parkPlan, readyAfterFiling, stillOn } from "./lib/parkable";
-  import { activeTechNames, copiesNotShown, rowActive, shadowedCopies, shadowedText } from "./lib/shadowedCopies";
+  import { activeTechNames, copiesMayHaveMoved, rowActive, shadowedCopies, shadowedText } from "./lib/shadowedCopies";
   import { createParkLooseExplainer } from "./lib/components/library/parkLoose";
   import BulkBar from "./lib/components/library/BulkBar.svelte";
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
@@ -987,18 +987,18 @@
     const next = new Set(techNames);
     activeSet = next; // optimistic: the Library shows the new set at once
     let errors: number | null = null; // null: set_active threw
-    let unseen: boolean = false; // another copy of a name it turned on came since the last scan (#421)
+    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
     try {
       try {
         const rep = await applyActive(techNames);
         errors = rep.errors.length;
-        unseen = copiesNotShown(rep.otherCopies, mods, shadowed);
+        recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
       } catch (e) {
         // Taken as nothing applied: put the set back (unless something else set it since).
         if (activeSet === next) activeSet = before;
         reportError(e, "Applying your mods");
       }
-      if (errors !== 0 || unseen) await reconcileHeld();
+      if (errors !== 0 || recheck) await reconcileHeld();
     } finally {
       op.end();
     }
@@ -1298,8 +1298,11 @@
       }
       if (activeSet.has(techName) === wantOn && !(row && shadowed.has(row.path))) return;
     }
-    // A shadowed copy shows parked while its name is on through the copy in the mods folder. The
-    // game loads only one copy, and set_active never links a second, so say what would work.
+    // A shadowed copy shows parked while its name is on through the copy in the mods folder. That
+    // copy may have gone since the last scan (moved out, as the hint says): read the folder again
+    // first. Still there: the game loads only one copy, and set_active never links a second, so
+    // say what would work.
+    if (row && shadowed.has(row.path)) await runScan(false);
     const by = row && shadowed.get(row.path);
     if (by) {
       refuse(shadowedText(row?.title ?? techName, fileName(by.path)));
@@ -1345,25 +1348,25 @@
     else next.add(techName);
     activeSet = next; // optimistic: the switch moves at once
     let errors: number | null = null; // null: set_active threw
-    let unseen: boolean = false; // another copy of a name it turned on came since the last scan (#421)
+    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
     try {
       try {
         const rep = await applyActive([...next]);
         errors = rep.errors.length;
-        unseen = copiesNotShown(rep.otherCopies, mods, shadowed);
+        recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
       } catch (e) {
         // Taken as nothing applied: put the switch back (unless something else set the mods since).
         if (activeSet === next) activeSet = before;
         reportError(e, "Changing which mods are active");
       }
-      // Problems, or a copy the rows don't show yet: read the mods folder again before letting go
-      // of the write, so the switch shows what the game will load (#347).
-      if (errors !== 0 || unseen) await reconcileHeld();
+      // Problems, or a copy of a name that may have come or gone: read the mods folder again before
+      // letting go of the write, so the switch shows what the game will load (#347).
+      if (errors !== 0 || recheck) await reconcileHeld();
     } finally {
       op.end();
     }
-    // This copy was left parked for another copy that came meanwhile: say so instead of "on".
-    const loadedBy = unseen && mod ? shadowed.get(mod.path) : undefined;
+    // Turned on, but left parked for another copy that came meanwhile: say so instead of "on".
+    const loadedBy = recheck && !turningOff && mod ? shadowed.get(mod.path) : undefined;
     if (loadedBy) {
       refuse(shadowedText(name, fileName(loadedBy.path)));
       return;
@@ -2690,19 +2693,13 @@
     }
     const archive = archiveMove.archive;
     // A shadowed copy (#421) shows parked while its name is on through another copy: by tech name,
-    // Turn on would do nothing ("already on") and Park would park that other copy. Leave it out.
+    // Turn on would do nothing ("already on") and Park would park that other copy. Leave it out,
+    // after reading the folder again when one is selected (its other copy may have gone since).
+    if (list.some((m) => shadowed.has(m.path))) await runScan(false);
     const dup = list.filter((m) => shadowed.has(m.path));
     if (dup.length > 0) {
       list = list.filter((m) => !shadowed.has(m.path));
-      const by = shadowed.get(dup[0].path);
-      if (on && by)
-        toast({
-          message:
-            dup.length === 1
-              ? shadowedText(dup[0].title ?? dup[0].techName, fileName(by.path))
-              : `${modsCount(dup.length)} are already on from other copies in your mods folder, so Silo left them as they are. The game loads only one copy of a mod.`,
-          tone: "warn",
-        });
+      if (on) warnShadowed(dup);
       if (list.length === 0) {
         if (!on) info(dup.length === 1 ? "It's already parked." : "They're already parked.");
         return;
@@ -2779,6 +2776,14 @@
           reportError(problem, turnOn ? "Turning on mods" : "Parking mods");
           return "failed";
         }
+        // Left parked for another copy that came meanwhile (set_active's otherCopies): say so.
+        // None of them turned on: nothing changed, so no "turned on" and no Undo.
+        const kept = turnOn ? list.filter((m) => techNames.includes(m.techName) && shadowed.has(m.path)) : [];
+        if (kept.length > 0) {
+          warnShadowed(kept);
+          if (new Set(kept.map((m) => m.techName)).size === new Set(techNames).size) return null;
+          return false;
+        }
         return clean;
       },
       toast,
@@ -2787,6 +2792,18 @@
     // Done (its toast offers Undo): the selection was for this change. Kept when it was cancelled
     // or refused, so it can be tried again.
     if (outcome === "done") selection.clear();
+  }
+
+  /** Why these shadowed copies stay parked (#421): one by name with its other copy, or a count. */
+  function warnShadowed(rows: ModEntry[]) {
+    const by = shadowed.get(rows[0].path);
+    toast({
+      message:
+        rows.length === 1 && by
+          ? shadowedText(rows[0].title ?? rows[0].techName, fileName(by.path))
+          : `${modsCount(rows.length)} are already on from other copies in your mods folder, so Silo left them parked. The game loads only one copy of a mod.`,
+      tone: "warn",
+    });
   }
 
   /**
