@@ -12,10 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This release includes a **security fix**: a folder mod could make Silo read files outside the
 mod's own folder (see Security below). Updating is recommended.
 
-The library database upgrades to version 5. Before upgrading, Silo saves a copy of the old
-database in `db-snapshots` (`silo-before-v3.db` when you update from 1.0.3). Silo 1.0.3 can't
-open the upgraded database, so going back to 1.0.3 after updating isn't supported; the copy keeps
-your library as it was before the upgrade.
+The library database upgrades to version 5. Before upgrading, Silo tries to save a copy of the
+old database in `db-snapshots` (`silo-before-v3.db` when you update from 1.0.3). If a copy by
+that name is already there, Silo keeps it as it is; if the copy can't be made (a full disk, say),
+the upgrade still goes ahead. Silo 1.0.3 can't open the upgraded database, so going back to 1.0.3
+after updating isn't supported.
 
 ### Added
 
