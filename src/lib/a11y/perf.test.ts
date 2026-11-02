@@ -34,7 +34,7 @@ const rating = (t: string) => Number(t.slice(-1)) % 6;
 const NONE = { favorite: false, hidden: false, broken: false };
 const ctx: FilterContext = {
   curation: () => NONE,
-  active: (t) => !t.endsWith("0"),
+  active: (m) => !m.techName.endsWith("0"),
   conflicted: (m) => m.techName.endsWith("7"),
   hasUpdate: (t) => t.endsWith("3"),
   tags: () => [],

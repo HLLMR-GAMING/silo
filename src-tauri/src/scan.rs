@@ -213,6 +213,15 @@ pub fn root_mod_names(root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The tech names of the mods in a mods folder itself, read as a scan reads them (see
+/// [`root_mod_names`]): an entry that isn't a mod, such as a link that reaches nothing, has none.
+pub fn root_tech_names(root: &Path) -> HashSet<String> {
+    collect_root_candidates(root)
+        .into_iter()
+        .map(|c| c.tech_name)
+        .collect()
+}
+
 /// Mods parked in an archive folder's `<Category>/` subfolders (Silo-managed, one level of folders).
 fn collect_archive_candidates(archive: &Path) -> Vec<Candidate> {
     let mut out = Vec::new();

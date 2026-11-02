@@ -210,6 +210,7 @@
   import { onOtherDrive, runBulkSwitch } from "./lib/components/library/bulkSwitch";
   import { focusInside, returnFocusWhenHidden } from "./lib/components/library/focusReturn.svelte";
   import { fixedOnText, isUnparkable, parkPlan, readyAfterFiling, stillOn } from "./lib/parkable";
+  import { activeTechNames, copiesMayHaveMoved, rowActive, shadowedCopies, shadowedText } from "./lib/shadowedCopies";
   import { createParkLooseExplainer } from "./lib/components/library/parkLoose";
   import BulkBar from "./lib/components/library/BulkBar.svelte";
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
@@ -511,6 +512,10 @@
   const isFileable = (m: ModEntry) => !m.organized && m.kind === "zip";
   const organizedCount = $derived(mods.filter((m) => m.organized).length);
   const unorganizedCount = $derived(mods.filter(isFileable).length);
+  // Two rows can share a tech name (#421): `activeSet` says which names are on, and a row shows
+  // active only when it is the copy the game reads. `isOn` is what a row, a count or a filter shows.
+  const shadowed = $derived(shadowedCopies(mods));
+  const isOn = (m: ModEntry) => rowActive(m, activeSet, shadowed);
 
   let savegames = $state<Savegame[]>([]);
   let conflicts = $state<Conflict[]>([]);
@@ -525,7 +530,7 @@
   // Active set as manifest refs for MP sync (techName, path, kind, version).
   const activeModRefs = $derived(
     mods
-      .filter((m) => activeSet.has(m.techName))
+      .filter(isOn)
       .map((m) => ({ techName: m.techName, path: m.path, kind: m.kind, version: m.version })),
   );
   // Set when a previous bisection didn't finish (app closed mid-run) — the user's mod
@@ -555,7 +560,7 @@
   let logReadKey = $state(0);
   const CRASH_KEY = "crash";
   /** Mods Find the problem mod would test: the active ones that aren't maps. */
-  const bisectSuspects = $derived(mods.filter((m) => activeSet.has(m.techName) && !m.isMap).length);
+  const bisectSuspects = $derived(mods.filter((m) => isOn(m) && !m.isMap).length);
   /** The library's title and active state for a log name (a tech name). */
   function libraryLookup(techName: string): { title: string; active: boolean } | null {
     const m = mods.find((x) => x.techName === techName);
@@ -841,7 +846,7 @@
   /** Only the lock's on/off: fgLock is a new object on every op start, end or label change. */
   const fgBlocked = $derived(fgLock.blocked);
   async function runConflictCheck() {
-    const active = mods.filter((m) => activeSet.has(m.techName));
+    const active = mods.filter(isOn);
     if (active.length < 2) {
       conflictsLatest.cancel();
       conflicts = [];
@@ -982,15 +987,18 @@
     const next = new Set(techNames);
     activeSet = next; // optimistic: the Library shows the new set at once
     let errors: number | null = null; // null: set_active threw
+    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
     try {
       try {
-        errors = (await applyActive(techNames)).errors.length;
+        const rep = await applyActive(techNames);
+        errors = rep.errors.length;
+        recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
       } catch (e) {
         // Taken as nothing applied: put the set back (unless something else set it since).
         if (activeSet === next) activeSet = before;
         reportError(e, "Applying your mods");
       }
-      if (errors !== 0) await reconcileHeld();
+      if (errors !== 0 || recheck) await reconcileHeld();
     } finally {
       op.end();
     }
@@ -1276,21 +1284,41 @@
     };
   }
 
-  /** Turn one mod on or park it, then offer Undo (the switch toast). */
-  async function toggleActive(techName: string) {
+  /** Turn one mod on or park it, then offer Undo (the switch toast).
+   *  @param row the library row switched, when there is one (a tech name can have two, #421) */
+  async function toggleActive(techName: string, row?: ModEntry) {
+    // What the click asks for, as the row (or the name) showed it then: kept across the scans below.
+    const wantOn = row ? !isOn(row) : !activeSet.has(techName);
     // A scan running now read the active set before this switch: landing after it, it would put
     // the switch back (and the next switch would re-apply that stale set). Wait for it, then
     // switch from what the scan found (nothing to do when it already shows the mod as asked).
     if (scanning) {
-      const wantOn = !activeSet.has(techName);
       if (!(await settleScan())) {
         refuse(SCAN_WAIT);
         return;
       }
-      if (activeSet.has(techName) === wantOn) return;
+    } else if (row && shadowed.has(row.path)) {
+      // A shadowed copy (#421): its other copy may have gone since the last scan (moved out, as
+      // the hint says), so read the mods folder again before deciding.
+      await runScan(false);
     }
-    const turningOff = activeSet.has(techName);
-    const mod = effectiveMods.find((m) => m.techName === techName);
+    // The row switched, as the scan has it now; else the copy the game reads. A row that moved
+    // (filed meanwhile) is followed by its name only while that name has one row: with two, the
+    // other could be the copy the game loads, so the click is dropped and the list shows the change.
+    const named = effectiveMods.filter((m) => m.techName === techName);
+    const mod = row
+      ? (effectiveMods.find((m) => m.path === row.path) ?? (named.length === 1 ? named[0] : undefined))
+      : named.find((m) => !shadowed.has(m.path));
+    if (row && !mod) return;
+    if ((mod ? isOn(mod) : activeSet.has(techName)) === wantOn) return;
+    // Still shadowed: the game loads only one copy, and set_active never links a second, so say
+    // what would work.
+    const by = mod && shadowed.get(mod.path);
+    if (by) {
+      refuse(shadowedText(mod?.title ?? techName, fileName(by.path)));
+      return;
+    }
+    const turningOff = !wantOn;
     const name = mod?.title ?? techName;
     // A loose (unorganized) mod isn't a Silo projection — it's the user's own file sitting in the
     // live folder, so set_active can't remove it (and would silently no-op, the toggle bouncing
@@ -1322,23 +1350,36 @@
     switchUndo.dismiss();
     const before = activeSet;
     const next = new Set(activeSet);
-    if (next.has(techName)) next.delete(techName);
+    if (turningOff) next.delete(techName);
     else next.add(techName);
     activeSet = next; // optimistic: the switch moves at once
     let errors: number | null = null; // null: set_active threw
+    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
+    let keptParked: boolean = false; // set_active left this copy parked for another one (#421)
     try {
       try {
-        errors = (await applyActive([...next])).errors.length;
+        const rep = await applyActive([...next]);
+        errors = rep.errors.length;
+        recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
+        keptParked = !turningOff && (rep.otherCopies ?? []).includes(techName);
       } catch (e) {
         // Taken as nothing applied: put the switch back (unless something else set the mods since).
         if (activeSet === next) activeSet = before;
         reportError(e, "Changing which mods are active");
       }
-      // Problems: read the mods folder again before letting go of the write, so the switch shows
-      // what the game will load (#347).
-      if (errors !== 0) await reconcileHeld();
+      // Problems, or a copy of a name that may have come or gone: read the mods folder again before
+      // letting go of the write, so the switch shows what the game will load (#347).
+      if (errors !== 0 || recheck) await reconcileHeld();
     } finally {
       op.end();
+    }
+    // Turned on, but set_active left this copy parked for another copy that came meanwhile: say
+    // so instead of "turned on", with no Undo (this copy didn't change). Read from set_active's
+    // report, so it holds even when the rescan failed.
+    if (keptParked) {
+      const loadedBy = mod && shadowed.get(mod.path);
+      refuse(shadowedText(name, loadedBy ? fileName(loadedBy.path) : null));
+      return;
     }
     // Nothing changed (it failed, and the mods folder still holds the old set): no Undo.
     const clean = switchOutcome(errors, before, activeSet, !scanFailed);
@@ -1784,7 +1825,7 @@
         title: "Put every mod back in your mods folder?",
         body: (() => {
           // Say the consequence: parked mods land in the mods folder too, so the game loads them.
-          const parked = mods.filter((m) => !activeSet.has(m.techName)).length;
+          const parked = mods.filter((m) => !isOn(m)).length;
           return (
             `All ${nMods(mods.length)} go back into your mods folder, so the game loads every one of them` +
             (parked > 0 ? `, including the ${nMods(parked)} parked now` : "") +
@@ -1867,7 +1908,7 @@
    */
   function rowMenuFor(mod: ModEntry, at: MenuTarget): { items: MenuItem[]; run: (id: string) => void } {
     const c = cur(mod.techName);
-    const isActive = activeSet.has(mod.techName);
+    const isActive = isOn(mod);
     const hasSettings = settingsModsSet.has(mod.techName);
     const items: MenuItem[] = [
       { id: "active", label: isActive ? "Park" : "Turn on", icon: isActive ? "circle" : "dot" },
@@ -1886,7 +1927,7 @@
     const run = (id: string) => {
       switch (id) {
         case "active":
-          return void toggleActive(mod.techName);
+          return void toggleActive(mod.techName, mod);
         case "sets":
           return openMembership([mod], false);
         case "details":
@@ -2472,7 +2513,7 @@
   /** What the filters read beyond a mod's scan entry (curation, conflicts, updates, tags). */
   const filterCtx: FilterContext = {
     curation: (t) => cur(t),
-    active: (t) => activeSet.has(t),
+    active: (m) => isOn(m as ModEntry),
     conflicted: (m) => conflictedSet.has(m.techName),
     hasUpdate: (t) => updatesSet.has(t),
     tags: (t) => tagsOf(t),
@@ -2545,7 +2586,7 @@
   let bulkBarEl = $state<HTMLElement | null>(null);
   let libToolbar = $state<{ focusFilters: () => boolean; focusFirst: () => boolean }>();
   /** A row's accessible name: its title and state ("Courseplay, active"). */
-  const rowLabel = (m: ModEntry) => `${m.title ?? m.techName}, ${activeSet.has(m.techName) ? "active" : "parked"}`;
+  const rowLabel = (m: ModEntry) => `${m.title ?? m.techName}, ${isOn(m) ? "active" : "parked"}`;
   // List ↔ cards: the new view starts on the mod the old one was on (focused if focus was in it,
   // else just scrolled to and made the tab stop).
   let shownView = untrack(() => libView);
@@ -2576,6 +2617,7 @@
   // A row's badges: problems, then status, then info (the row caps them at three).
   function badgesFor(mod: ModEntry) {
     const c = cur(mod.techName);
+    const by = shadowed.get(mod.path);
     return rowBadges(mod, {
       verdict: getVerdict(mod)?.status,
       hasUpdate: updatesSet.has(mod.techName),
@@ -2583,6 +2625,7 @@
       conflicted: conflictedSet.has(mod.techName),
       flagged: c.broken,
       hidden: c.hidden,
+      shadowedBy: by ? fileName(by.path) : undefined,
     });
   }
 
@@ -2659,6 +2702,19 @@
       return;
     }
     const archive = archiveMove.archive;
+    // A shadowed copy (#421) shows parked while its name is on through another copy: by tech name,
+    // Turn on would do nothing ("already on") and Park would park that other copy. Leave it out,
+    // after reading the folder again when one is selected (its other copy may have gone since).
+    if (list.some((m) => shadowed.has(m.path))) await runScan(false);
+    const dup = list.filter((m) => shadowed.has(m.path));
+    if (dup.length > 0) {
+      list = list.filter((m) => !shadowed.has(m.path));
+      if (on) warnShadowed(dup);
+      if (list.length === 0) {
+        if (!on) info(dup.length === 1 ? "It's already parked." : "They're already parked.");
+        return;
+      }
+    }
     // Folder mods can't be parked: say so instead of reporting them parked.
     if (!on) {
       const fixed = list.filter((m) => activeSet.has(m.techName) && isUnparkable(m));
@@ -2715,9 +2771,11 @@
         activeSet = next;
         let problem: unknown = null;
         let clean = true;
+        let otherCopies: string[] = []; // names set_active left parked for another copy (#421)
         try {
           const rep = await applyActive([...next]); // reports its own problems
           clean = rep.errors.length === 0;
+          otherCopies = rep.otherCopies ?? [];
         } catch (e) {
           problem = e;
         } finally {
@@ -2730,6 +2788,17 @@
           reportError(problem, turnOn ? "Turning on mods" : "Parking mods");
           return "failed";
         }
+        // Left parked for another copy that came meanwhile (set_active's otherCopies, so it holds
+        // even when the rescan failed): say so. None of them turned on: nothing changed, so no
+        // "turned on" and no Undo.
+        const kept = turnOn
+          ? list.filter((m) => m.organized && techNames.includes(m.techName) && otherCopies.includes(m.techName))
+          : [];
+        if (kept.length > 0) {
+          warnShadowed(kept);
+          if (new Set(kept.map((m) => m.techName)).size === new Set(techNames).size) return null;
+          return false;
+        }
         return clean;
       },
       toast,
@@ -2738,6 +2807,18 @@
     // Done (its toast offers Undo): the selection was for this change. Kept when it was cancelled
     // or refused, so it can be tried again.
     if (outcome === "done") selection.clear();
+  }
+
+  /** Why these shadowed copies stay parked (#421): one by name with its other copy, or a count. */
+  function warnShadowed(rows: ModEntry[]) {
+    const by = shadowed.get(rows[0].path);
+    toast({
+      message:
+        rows.length === 1
+          ? shadowedText(rows[0].title ?? rows[0].techName, by ? fileName(by.path) : null)
+          : `${modsCount(rows.length)} are already on from other copies in your mods folder, so Silo left them parked. The game loads only one copy of a mod.`,
+      tone: "warn",
+    });
   }
 
   /**
@@ -3553,7 +3634,7 @@
       releaseInstalled(installedUnscanned, scanFrom);
       libraryScanned = true;
       scanFailed = false;
-      activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
+      activeSet = activeTechNames(r.mods);
       scanned = true;
       // Interrupted mod updates Silo finished or rolled back before scanning. The scan owns
       // only the `scan` notice: other producers' notices stay up across rescans.
@@ -3868,9 +3949,8 @@
   // conflicts, files Silo left untouched and inactive mods that couldn't load. Info-level
   // findings never count.
   const statusCounts = $derived.by(() => {
-    const on = (m: ModEntry) => activeSet.has(m.techName);
     const deps = health.missingDeps.map((d) => d.mod);
-    const activeOf = (list: ModEntry[]) => list.filter(on).length;
+    const activeOf = (list: ModEntry[]) => list.filter(isOn).length;
     const all = deps.length + health.corrupt.length + health.ignored.length;
     const missingDeps = activeOf(deps);
     const corrupt = activeOf(health.corrupt);
@@ -4064,7 +4144,7 @@
         mod={dm}
         curation={cur(dm.techName)}
         tags={tagsOf(dm.techName)}
-        active={activeSet.has(dm.techName)}
+        active={isOn(dm)}
         organized={dm.organized}
         hasSettings={settingsModsSet.has(dm.techName)}
         hasUpdate={updatesSet.has(dm.techName)}
@@ -4083,7 +4163,7 @@
         onResetCategory={() => resetCategory(dm.techName)}
         onClose={() => (detailMod = null)}
         onToggle={(flag) => toggleCuration(dm.techName, flag)}
-        onToggleActive={() => toggleActive(dm.techName)}
+        onToggleActive={() => toggleActive(dm.techName, dm)}
         onOpenSettings={() =>
           (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
         onFindInBrowse={() => openInBrowse(dm)}
@@ -4214,7 +4294,7 @@
               count={selection.size}
               shownCount={visible.length}
               allShownSelected={selection.size === visible.length}
-              activeCount={selectedMods.filter((m) => activeSet.has(m.techName)).length}
+              activeCount={selectedMods.filter(isOn).length}
               allFavorite={selectedMods.every((m) => cur(m.techName).favorite)}
               allHidden={selectedMods.every((m) => cur(m.techName).hidden)}
               allSkipUpdates={selectedMods.every((m) => cur(m.techName).skipUpdates)}
@@ -4284,7 +4364,7 @@
                 bottomPad={16}
                 label="Mods"
                 onopen={(mod) => (detailMod = mod)}
-                ontoggle={(mod) => toggleActive(mod.techName)}
+                ontoggle={(mod) => toggleActive(mod.techName, mod)}
                 onselect={(mod, intent) => selectMod(modKey(mod), intent)}
                 onmenu={(mod, anchor) => openRowMenu(mod, { anchor })}
                 onselectall={() => selection.selectAll(visibleKeys)}
@@ -4293,7 +4373,7 @@
                   {@const c = cur(mod.techName)}
                   <ModCard
                     {mod}
-                    active={activeSet.has(mod.techName)}
+                    active={isOn(mod)}
                     badges={badgesFor(mod)}
                     favorite={c.favorite}
                     flagged={c.broken}
@@ -4301,7 +4381,7 @@
                     menuOpen={rowMenuOpen && rowMenu?.mod.path === mod.path}
                     selected={selection.has(modKey(mod))}
                     selectionMode={selection.size > 0}
-                    onToggle={() => toggleActive(mod.techName)}
+                    onToggle={() => toggleActive(mod.techName, mod)}
                     onOpen={() => (detailMod = mod)}
                     onMenu={(at) => openRowMenu(mod, at)}
                     onSelect={selectMod}
@@ -4318,7 +4398,7 @@
                 bottomPad={16}
                 label="Mods"
                 onopen={(mod) => (detailMod = mod)}
-                ontoggle={(mod) => toggleActive(mod.techName)}
+                ontoggle={(mod) => toggleActive(mod.techName, mod)}
                 onselect={(mod, intent) => selectMod(modKey(mod), intent)}
                 onmenu={(mod, anchor) => openRowMenu(mod, { anchor })}
                 onselectall={() => selection.selectAll(visibleKeys)}
@@ -4327,7 +4407,7 @@
                   {@const c = cur(mod.techName)}
                   <ModListRow
                     {mod}
-                    active={activeSet.has(mod.techName)}
+                    active={isOn(mod)}
                     badges={badgesFor(mod)}
                     density={libDensity}
                     favorite={c.favorite}
@@ -4335,7 +4415,7 @@
                     menuOpen={rowMenuOpen && rowMenu?.mod.path === mod.path}
                     selected={selection.has(modKey(mod))}
                     selectionMode={selection.size > 0}
-                    onToggle={() => toggleActive(mod.techName)}
+                    onToggle={() => toggleActive(mod.techName, mod)}
                     onOpen={() => (detailMod = mod)}
                     onMenu={(at) => openRowMenu(mod, at)}
                     onSelect={selectMod}
@@ -4643,7 +4723,7 @@
         <LogTriage
           gameProfile={profileInUse(modsStatus)}
           activeMods={[...activeSet]}
-          activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
+          activeMaps={mods.filter((m) => isOn(m) && m.isMap).map((m) => m.techName)}
           activeFixed={mods.filter((m) => activeSet.has(m.techName) && !m.organized && m.kind !== "zip").map((m) => m.techName)}
           onBisectPrepare={prepareBisect}
           onApply={bisectRound}

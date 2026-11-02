@@ -65,7 +65,7 @@ describe("never colour alone", () => {
   it("every library badge has a word and an icon", () => {
     const all = rowBadges(
       { error: "bad zip", ignoredDigitPrefix: true, kind: "dir", isMap: true, scriptCount: 2 },
-      { verdict: "modified", hasUpdate: true, hasSettings: true, conflicted: true, flagged: true, hidden: true },
+      { verdict: "modified", hasUpdate: true, hasSettings: true, conflicted: true, flagged: true, hidden: true, shadowedBy: "FS25_A" },
     );
     const verified = rowBadges({ error: null, ignoredDigitPrefix: false, kind: "zip", isMap: false, scriptCount: 0 }, { verdict: "verified" });
     for (const b of [...all, ...verified]) {

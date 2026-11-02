@@ -1,7 +1,7 @@
 // The badges a library row or card shows, most important first. Pure, so it unit-tests without
 // the app. Rows show at most three (capBadges) and a "+n" for the rest, so the order matters:
 //   problems (Modified, Can't load, Ignored name, Conflict, Flagged)
-//   → status (Verified build, Update, Folder mod, Hidden)
+//   → status (Other copy loads, Verified build, Update, Folder mod, Hidden)
 //   → info (Map, Has settings, script count)
 //   rowBadges(mod, { verdict: "modified", hasUpdate: true }) -> [Modified, Update, ...]
 import type { IconName } from "../../ui/icons";
@@ -34,6 +34,8 @@ export interface RowBadgeContext {
   flagged?: boolean;
   /** Hidden by the user (only listed while "Hidden" is on). */
   hidden?: boolean;
+  /** A parked copy whose tech name the game loads from another copy: that copy's file name (#421). */
+  shadowedBy?: string;
 }
 
 type BadgeMod = Pick<ModEntry, "error" | "ignoredDigitPrefix" | "kind" | "isMap" | "scriptCount">;
@@ -66,6 +68,9 @@ export function rowBadges(mod: BadgeMod, ctx: RowBadgeContext = {}): BadgeSpec[]
   }
 
   // Status: where the mod stands.
+  if (ctx.shadowedBy) {
+    add({ id: "shadowed", label: "Other copy loads", tone: "warn", icon: "copy", group: "status", title: `The game loads another copy of this mod, ${ctx.shadowedBy} in your mods folder, so this one stays parked.` });
+  }
   if (ctx.verdict === "verified") {
     add({ id: "verified", label: "Verified build", tone: "success", icon: "verifiedBuild", group: "status", title: "Matches the published build" });
   }

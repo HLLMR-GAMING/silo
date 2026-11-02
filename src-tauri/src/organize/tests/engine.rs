@@ -184,6 +184,55 @@ fn activation_reports_a_foreign_file_in_the_mods_slot() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+// Another mod of the same tech name already in the mods folder (an unzipped folder beside an
+// archived zip, #421) is the copy the game loads: turning the name on never links a second copy
+// beside it. Without that copy the archived zip is linked as usual.
+#[test]
+fn activation_never_links_a_second_copy_of_a_loaded_tech_name() {
+    let base = temp_dir_for("act_second_copy");
+    std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let key = crate::modsroot::canonical_key(&base);
+    let layout = Layout::default_for(&base);
+    std::fs::write(base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"), b"PK").unwrap();
+    // Still flagged active (it was linked before the folder came), so the flag is put right.
+    organize_row(&conn, &base, "FS25_Foo", "Vehicles", true);
+    let folder = base.join("FS25_Foo");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+
+    let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+    let rep = set_active(&conn, &layout, &on);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.changed, 1);
+    assert!(!db::load_organized(&conn, &key)[0].active);
+    let rep = set_active(&conn, &layout, &on);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!((rep.changed, rep.skipped), (0, 1));
+    assert_eq!(
+        rep.other_copies,
+        vec!["FS25_Foo".to_string()],
+        "the Library is told why"
+    );
+    assert!(base.join("FS25_Foo.zip").symlink_metadata().is_err());
+    assert!(!db::load_organized(&conn, &key)[0].active);
+    assert!(
+        folder.join("modDesc.xml").is_file(),
+        "the folder is left as it is"
+    );
+
+    // A folder that isn't a mod (no modDesc.xml) loads nothing, so it doesn't count.
+    std::fs::remove_file(folder.join("modDesc.xml")).unwrap();
+    let rep = set_active(&conn, &layout, &on);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.changed, 1);
+    assert!(rep.other_copies.is_empty());
+    assert!(base.join("FS25_Foo.zip").is_file());
+    assert!(db::load_organized(&conn, &key)[0].active);
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // The other half of an interrupted park: the link is gone but the row still says active.
 #[test]
 fn a_parked_mod_still_marked_active_is_reconciled() {

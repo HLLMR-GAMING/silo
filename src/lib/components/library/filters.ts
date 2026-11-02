@@ -78,7 +78,8 @@ export const NO_FILTERS: Readonly<LibraryFilters> = Object.freeze({
 /** What the filters need beyond a mod's scan entry. */
 export interface FilterContext {
   curation: (techName: string) => { favorite: boolean; hidden: boolean; broken: boolean };
-  active: (techName: string) => boolean;
+  /** Whether the row shows active (a copy of an active name can show parked, #421). */
+  active: (mod: FilterMod) => boolean;
   /** Named in a warning-or-worse conflict (by tech name or title). */
   conflicted: (mod: FilterMod) => boolean;
   hasUpdate: (techName: string) => boolean;
@@ -123,8 +124,8 @@ export function filterMods<M extends FilterMod>(list: readonly M[], f: LibraryFi
   return list.filter((m) => {
     const c = ctx.curation(m.techName);
     if (!f.hidden && c.hidden) return false;
-    if (f.status === "active" && !ctx.active(m.techName)) return false;
-    if (f.status === "parked" && ctx.active(m.techName)) return false;
+    if (f.status === "active" && !ctx.active(m)) return false;
+    if (f.status === "parked" && ctx.active(m)) return false;
     if (f.favorites && !c.favorite) return false;
     if (f.flagged && !c.broken) return false;
     if (f.conflicted && !ctx.conflicted(m)) return false;
