@@ -72,8 +72,11 @@ export function copiesMayHaveMoved(
 /**
  * Why a shadowed copy can't be turned on, for the refusal toast.
  * @param name the row's title
- * @param other the file or folder name of the copy in the mods folder
+ * @param other the file or folder name of the copy in the mods folder, or null when the Library
+ *   hasn't read it yet
  */
-export function shadowedText(name: string, other: string): string {
+export function shadowedText(name: string, other: string | null): string {
+  if (other === null)
+    return `${name} is already on from another copy in your mods folder. The game loads only one copy of a mod. To use this one, move that copy out of your mods folder.`;
   return `${name} is already on from another copy in your mods folder, ${other}. The game loads only one copy of a mod. To use this one, move ${other} out of your mods folder.`;
 }

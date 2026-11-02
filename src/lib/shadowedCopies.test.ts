@@ -69,5 +69,9 @@ describe("shadowedText", () => {
     expect(shadowedText("Big Tractor", "FS25_A")).toBe(
       "Big Tractor is already on from another copy in your mods folder, FS25_A. The game loads only one copy of a mod. To use this one, move FS25_A out of your mods folder.",
     );
+    // The other copy came after the last scan (or the rescan failed): not named, still explained.
+    expect(shadowedText("Big Tractor", null)).toBe(
+      "Big Tractor is already on from another copy in your mods folder. The game loads only one copy of a mod. To use this one, move that copy out of your mods folder.",
+    );
   });
 });

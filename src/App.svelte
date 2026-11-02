@@ -1287,32 +1287,38 @@
   /** Turn one mod on or park it, then offer Undo (the switch toast).
    *  @param row the library row switched, when there is one (a tech name can have two, #421) */
   async function toggleActive(techName: string, row?: ModEntry) {
+    // What the click asks for, as the row (or the name) showed it then: kept across the scans below.
+    const wantOn = row ? !isOn(row) : !activeSet.has(techName);
     // A scan running now read the active set before this switch: landing after it, it would put
     // the switch back (and the next switch would re-apply that stale set). Wait for it, then
     // switch from what the scan found (nothing to do when it already shows the mod as asked).
     if (scanning) {
-      const wantOn = row ? !isOn(row) : !activeSet.has(techName);
       if (!(await settleScan())) {
         refuse(SCAN_WAIT);
         return;
       }
-      if (activeSet.has(techName) === wantOn && !(row && shadowed.has(row.path))) return;
+    } else if (row && shadowed.has(row.path)) {
+      // A shadowed copy (#421): its other copy may have gone since the last scan (moved out, as
+      // the hint says), so read the mods folder again before deciding.
+      await runScan(false);
     }
-    // A shadowed copy shows parked while its name is on through the copy in the mods folder. That
-    // copy may have gone since the last scan (moved out, as the hint says): read the folder again
-    // first. Still there: the game loads only one copy, and set_active never links a second, so
-    // say what would work.
-    if (row && shadowed.has(row.path)) await runScan(false);
-    const by = row && shadowed.get(row.path);
+    // The row switched, as the scan has it now; else the copy the game reads. A row that moved
+    // (filed meanwhile) is followed by its name only while that name has one row: with two, the
+    // other could be the copy the game loads, so the click is dropped and the list shows the change.
+    const named = effectiveMods.filter((m) => m.techName === techName);
+    const mod = row
+      ? (effectiveMods.find((m) => m.path === row.path) ?? (named.length === 1 ? named[0] : undefined))
+      : named.find((m) => !shadowed.has(m.path));
+    if (row && !mod) return;
+    if ((mod ? isOn(mod) : activeSet.has(techName)) === wantOn) return;
+    // Still shadowed: the game loads only one copy, and set_active never links a second, so say
+    // what would work.
+    const by = mod && shadowed.get(mod.path);
     if (by) {
-      refuse(shadowedText(row?.title ?? techName, fileName(by.path)));
+      refuse(shadowedText(mod?.title ?? techName, fileName(by.path)));
       return;
     }
-    const turningOff = activeSet.has(techName);
-    // The row switched, as the scan has it now; else the copy the game reads.
-    const mod =
-      (row && effectiveMods.find((m) => m.path === row.path)) ||
-      effectiveMods.find((m) => m.techName === techName && !shadowed.has(m.path));
+    const turningOff = !wantOn;
     const name = mod?.title ?? techName;
     // A loose (unorganized) mod isn't a Silo projection — it's the user's own file sitting in the
     // live folder, so set_active can't remove it (and would silently no-op, the toggle bouncing
@@ -1344,16 +1350,18 @@
     switchUndo.dismiss();
     const before = activeSet;
     const next = new Set(activeSet);
-    if (next.has(techName)) next.delete(techName);
+    if (turningOff) next.delete(techName);
     else next.add(techName);
     activeSet = next; // optimistic: the switch moves at once
     let errors: number | null = null; // null: set_active threw
     let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
+    let keptParked: boolean = false; // set_active left this copy parked for another one (#421)
     try {
       try {
         const rep = await applyActive([...next]);
         errors = rep.errors.length;
         recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
+        keptParked = !turningOff && (rep.otherCopies ?? []).includes(techName);
       } catch (e) {
         // Taken as nothing applied: put the switch back (unless something else set the mods since).
         if (activeSet === next) activeSet = before;
@@ -1365,10 +1373,12 @@
     } finally {
       op.end();
     }
-    // Turned on, but left parked for another copy that came meanwhile: say so instead of "on".
-    const loadedBy = recheck && !turningOff && mod ? shadowed.get(mod.path) : undefined;
-    if (loadedBy) {
-      refuse(shadowedText(name, fileName(loadedBy.path)));
+    // Turned on, but set_active left this copy parked for another copy that came meanwhile: say
+    // so instead of "turned on", with no Undo (this copy didn't change). Read from set_active's
+    // report, so it holds even when the rescan failed.
+    if (keptParked) {
+      const loadedBy = mod && shadowed.get(mod.path);
+      refuse(shadowedText(name, loadedBy ? fileName(loadedBy.path) : null));
       return;
     }
     // Nothing changed (it failed, and the mods folder still holds the old set): no Undo.
@@ -2761,9 +2771,11 @@
         activeSet = next;
         let problem: unknown = null;
         let clean = true;
+        let otherCopies: string[] = []; // names set_active left parked for another copy (#421)
         try {
           const rep = await applyActive([...next]); // reports its own problems
           clean = rep.errors.length === 0;
+          otherCopies = rep.otherCopies ?? [];
         } catch (e) {
           problem = e;
         } finally {
@@ -2776,9 +2788,12 @@
           reportError(problem, turnOn ? "Turning on mods" : "Parking mods");
           return "failed";
         }
-        // Left parked for another copy that came meanwhile (set_active's otherCopies): say so.
-        // None of them turned on: nothing changed, so no "turned on" and no Undo.
-        const kept = turnOn ? list.filter((m) => techNames.includes(m.techName) && shadowed.has(m.path)) : [];
+        // Left parked for another copy that came meanwhile (set_active's otherCopies, so it holds
+        // even when the rescan failed): say so. None of them turned on: nothing changed, so no
+        // "turned on" and no Undo.
+        const kept = turnOn
+          ? list.filter((m) => m.organized && techNames.includes(m.techName) && otherCopies.includes(m.techName))
+          : [];
         if (kept.length > 0) {
           warnShadowed(kept);
           if (new Set(kept.map((m) => m.techName)).size === new Set(techNames).size) return null;
@@ -2799,8 +2814,8 @@
     const by = shadowed.get(rows[0].path);
     toast({
       message:
-        rows.length === 1 && by
-          ? shadowedText(rows[0].title ?? rows[0].techName, fileName(by.path))
+        rows.length === 1
+          ? shadowedText(rows[0].title ?? rows[0].techName, by ? fileName(by.path) : null)
           : `${modsCount(rows.length)} are already on from other copies in your mods folder, so Silo left them parked. The game loads only one copy of a mod.`,
       tone: "warn",
     });
