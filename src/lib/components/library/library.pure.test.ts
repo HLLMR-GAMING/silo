@@ -15,7 +15,7 @@ describe("rowBadges", () => {
   it("orders problems, then status, then info", () => {
     const all = rowBadges(
       { error: "boom", ignoredDigitPrefix: true, kind: "dir", isMap: true, scriptCount: 3 },
-      { verdict: "modified", hasUpdate: true, hasSettings: true, conflicted: true, flagged: true, hidden: true },
+      { verdict: "modified", hasUpdate: true, hasSettings: true, conflicted: true, flagged: true, hidden: true, shadowedBy: "FS25_A" },
     );
     expect(all.map((b) => b.id)).toEqual([
       "modified",
@@ -23,6 +23,7 @@ describe("rowBadges", () => {
       "ignored",
       "conflict",
       "flagged",
+      "shadowed",
       "update",
       "folder",
       "hidden",
@@ -33,6 +34,12 @@ describe("rowBadges", () => {
     const groups = all.map((b) => b.group);
     expect(groups.indexOf("status")).toBeGreaterThan(groups.lastIndexOf("problem"));
     expect(groups.indexOf("info")).toBeGreaterThan(groups.lastIndexOf("status"));
+  });
+
+  it("names the copy the game loads on a shadowed copy (#421)", () => {
+    const [b] = rowBadges(base, { shadowedBy: "FS25_A" });
+    expect(b).toMatchObject({ id: "shadowed", label: "Other copy loads", group: "status" });
+    expect(b.title).toBe("The game loads another copy of this mod, FS25_A in your mods folder, so this one stays parked.");
   });
 
   it("puts Verified build first among status badges and words the script count", () => {

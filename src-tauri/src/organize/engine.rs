@@ -127,6 +127,8 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
     let mut policy = LinkPolicy::new(layout);
+    // The tech names of the mods in the mods folder, read once the first link is due.
+    let mut in_root: Option<HashSet<String>> = None;
     for row in db::load_organized(conn, &key) {
         let link = root.join(&row.file_name);
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
@@ -166,7 +168,25 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
             }
         };
 
-        if want && !linked {
+        // Nothing at the mod's own name, but another mod of its tech name is in the mods folder
+        // (an unzipped folder beside this archived zip, say, #421): the game knows a mod by its
+        // tech name, so the name is already on through that copy. A second copy is never linked
+        // beside it, and this one stays parked. The Library shows it parked and says why.
+        let other_copy = want
+            && !linked
+            && in_root
+                .get_or_insert_with(|| crate::scan::root_tech_names(root))
+                .contains(&row.tech_name);
+        if other_copy {
+            if row.active {
+                match db::set_organized_active(conn, &key, &row.tech_name, false) {
+                    Ok(()) => rep.changed += 1,
+                    Err(e) => rep.errors.push(format!("{}: manifest: {e}", row.tech_name)),
+                }
+            } else {
+                rep.skipped += 1;
+            }
+        } else if want && !linked {
             match make_link(&src, &link, &row.kind, &mut policy) {
                 Ok(()) => {
                     // Record the projection's identity so a later deactivate can confirm it's

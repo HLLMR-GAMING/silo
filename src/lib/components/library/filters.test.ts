@@ -55,7 +55,7 @@ function ctx(over: Partial<FilterContext> = {}): FilterContext {
   };
   return {
     curation: (t) => curation[t] ?? { favorite: false, hidden: false, broken: false },
-    active: (t) => t === "A_map" || t === "B_script",
+    active: (m) => m.techName === "A_map" || m.techName === "B_script",
     conflicted: (m) => m.techName === "D_unique",
     hasUpdate: (t) => t === "B_script",
     tags: (t) => (t === "A_map" ? ["harvest"] : []),

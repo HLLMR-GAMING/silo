@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When your mods folder holds another copy of a library mod under the same name (for example an
+  unzipped `FS25_Tractor` folder next to the parked `FS25_Tractor.zip` in your library), the
+  Library no longer shows both as active. Only the copy the game loads shows active. The parked
+  copy shows parked, with an **Other copy loads** badge naming the other copy, and turning it on
+  says what to move out of the way. Silo also no longer adds the parked copy to your mods folder
+  next to the other one when you switch other mods. The filters, counts, conflict check and
+  multiplayer list follow what the rows show. (#421)
 - **Play** no longer starts the game without warning while a library archive move is paused
   and some of your active mods can't be opened from your mods folder (for example after Silo
   stopped partway through moving them). Play, and a **Find the problem mod** test round, now
