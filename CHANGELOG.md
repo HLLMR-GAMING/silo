@@ -12,10 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This release includes a **security fix**: a folder mod could make Silo read files outside the
 mod's own folder (see Security below). Updating is recommended.
 
-The library database moves to version 5: two added tables, used to keep catalog links for mods
-whose file name isn't their catalog name. Silo keeps a copy of the old one in
-`db-snapshots/silo-before-v3.db` before upgrading. Silo 1.0.3 won't open a version 5 database,
-so going back to 1.0.3 after updating isn't supported; that copy is kept in case you need to.
+The library database upgrades to version 5. Before upgrading, Silo saves a copy of the old
+database in `db-snapshots` (`silo-before-v3.db` when you update from 1.0.3). Silo 1.0.3 can't
+open the upgraded database, so going back to 1.0.3 after updating isn't supported; the copy keeps
+your library as it was before the upgrade.
 
 ### Added
 
@@ -1330,5 +1330,6 @@ First public beta.
   game-install discovery. Automatic mods-folder detection covers Windows and macOS;
   on Linux (Proton) the mods folder is set manually for now.
 
-[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.3...v1.0.4
 [0.1.0]: https://github.com/HLLMR-VENTURES/silo/releases/tag/v0.1.0
