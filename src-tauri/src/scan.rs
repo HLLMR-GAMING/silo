@@ -1911,4 +1911,34 @@ mod layout_tests {
         assert!(loose.active && Path::new(&loose.path).starts_with(&mods2));
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    /// #419 repro: an organized mod whose mods-folder entry FS25 can't open (a link to a folder
+    /// that's gone, a plain file where a folder mod should be, a folder where a zip should be)
+    /// is not active in the scan: it shows parked, which is what FS25 loads.
+    #[test]
+    fn an_entry_fs25_cant_open_leaves_the_archived_mod_parked() {
+        let base = fresh("broken_entry");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        let cat = arch.join("Tools");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&cat).unwrap();
+        moddesc_dir(&cat.join("FS25_Dangling"), "Dangling");
+        let gone = base.join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        crate::organize::link_dir_native(&gone, &mods.join("FS25_Dangling")).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        moddesc_dir(&cat.join("FS25_PlainFile"), "PlainFile");
+        std::fs::write(mods.join("FS25_PlainFile"), b"x").unwrap();
+        moddesc_zip(&cat.join("FS25_EmptyDir.zip"), "EmptyDir");
+        std::fs::create_dir_all(mods.join("FS25_EmptyDir.zip")).unwrap();
+
+        let out = scan_one(&mods, &arch);
+        assert_eq!(out.result.mods.len(), 3, "{:?}", out.result.mods);
+        for m in &out.result.mods {
+            assert!(m.organized, "{}", m.tech_name);
+            assert!(!m.active, "{} shows active", m.tech_name);
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
