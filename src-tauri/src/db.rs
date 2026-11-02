@@ -924,6 +924,17 @@ pub fn get_app_setting(conn: &Connection, key: &str) -> Option<String> {
     .ok()
 }
 
+/// `get_app_setting`, but a failed read is an error, never "not set" (#415: Play's move check
+/// must not read a broken DB as "no move").
+pub fn try_get_app_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    use rusqlite::OptionalExtension;
+    conn.query_row("SELECT value FROM app_setting WHERE key = ?1", [key], |r| {
+        r.get(0)
+    })
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
 pub fn set_app_setting(conn: &Connection, key: &str, value: Option<&str>) -> Result<(), String> {
     match value {
         None => conn.execute("DELETE FROM app_setting WHERE key = ?1", [key]),
@@ -1436,6 +1447,30 @@ pub fn load_organized(conn: &Connection, root: &str) -> Vec<OrganizedRow> {
         })
     });
     rows.map(|r| r.flatten().collect()).unwrap_or_default()
+}
+
+/// `load_organized`, but a failed read (of the table or of any row) is an error, never fewer
+/// rows (#415).
+pub fn try_load_organized(conn: &Connection, root: &str) -> Result<Vec<OrganizedRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT tech_name, file_name, kind, category, subcategory, active
+             FROM organized WHERE root = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([root], |r| {
+            Ok(OrganizedRow {
+                tech_name: r.get(0)?,
+                file_name: r.get(1)?,
+                kind: r.get(2)?,
+                category: r.get(3)?,
+                subcategory: r.get(4)?,
+                active: r.get::<_, i64>(5)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
 pub fn upsert_organized(conn: &Connection, root: &str, row: &OrganizedRow) -> Result<(), String> {

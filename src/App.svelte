@@ -39,7 +39,6 @@
     backupSavegame,
     detectConflicts,
     detectGame,
-    launchGame,
     modsWithSettings,
     getTags,
     setTags,
@@ -87,6 +86,7 @@
   import { ArchiveMove } from "./lib/archiveMove.svelte";
   import { capList, isOnlyLostCancel, modsCount, problemLines, unDot } from "./lib/archiveMoveLogic";
   import { sameMods } from "./lib/loadoutSafety";
+  import { launchAsking } from "./lib/launch";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { checkUpdate, installUpdate, type AvailableUpdate } from "./lib/updater";
@@ -795,8 +795,9 @@
     )
       return;
     try {
-      // The profile shown is the one started, or none is (#387).
-      await launchGame(profileInUse(modsStatus));
+      // The profile shown is the one started, or none is (#387). A paused library move that
+      // left mods unlinked asks first (#415).
+      if (!(await launchAsking(profileInUse(modsStatus)))) return;
       crashWatch.afterLaunch(); // look at the log when the game exits
     } catch (e) {
       reportError(e, "Launching the game");

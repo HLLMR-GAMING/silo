@@ -952,10 +952,16 @@ export function detectGame(): Promise<GameInfo | null> {
 }
 
 /** Start FS25. `expectedProfile`: the FS25 profile the app shows (null = the main one); the
- *  launch is refused if Silo would start another (#387). Left out: no such check. */
-export function launchGame(expectedProfile?: string | null): Promise<void> {
-  if (expectedProfile === undefined) return invoke("launch_game");
-  return invoke("launch_game", { expectedProfile, checkProfile: true });
+ *  launch is refused if Silo would start another (#387). Left out: no such check. While a paused
+ *  library move left mods FS25 can't open, it's refused with MOVE_LINKS_BROKEN naming them,
+ *  unless `playAnyway` (#415): use `launchAsking` (launch.ts), which asks. */
+export function launchGame(
+  expectedProfile?: string | null,
+  opts: { playAnyway?: boolean } = {},
+): Promise<void> {
+  const anyway = opts.playAnyway ? { playAnyway: true } : {};
+  if (expectedProfile === undefined) return invoke("launch_game", { ...anyway });
+  return invoke("launch_game", { expectedProfile, checkProfile: true, ...anyway });
 }
 
 /** Prompt for a path and save text (used by the diagnostics report). */

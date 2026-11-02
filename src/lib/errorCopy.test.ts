@@ -29,6 +29,7 @@ describe("describeError copy", () => {
     ["LIBRARY_BUSY", "Silo is finishing another change to your library. Try again in a moment.", true],
     ["MOVE_UNFINISHED", "Finish or cancel the library move first. You can resume or cancel it from the notice at the top.", false],
     ["MOVE_RUNNING", "Silo is moving your library archive. Pause the move to play, or wait for it to finish.", false],
+    ["MOVE_LINKS_BROKEN", "While the library move is paused, some active mods can't be opened from your mods folder. Resume the move from the notice at the top, then play.", false],
     ["ARCHIVE_UNAVAILABLE", "Your library archive isn't available. Connect the drive, or choose another folder.", true],
     ["PERMISSION_DENIED", "Windows didn't let Silo change this file. If it's in a protected folder, choose a mods folder in your Documents.", false],
     ["DISK_FULL", "There isn't enough space on the drive for this. Free some space and try again.", true],

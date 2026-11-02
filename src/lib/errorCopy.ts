@@ -40,6 +40,7 @@ export const ERROR_CODES = [
   "LIBRARY_BUSY",
   "MOVE_UNFINISHED",
   "MOVE_RUNNING",
+  "MOVE_LINKS_BROKEN",
   "GAME_RUNNING",
   "NOT_A_SET_LINK",
   "UNKNOWN",
@@ -169,6 +170,9 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
       return MOVE_UNFINISHED_COPY;
     case "MOVE_RUNNING":
       return "Silo is moving your library archive. Pause the move to play, or wait for it to finish.";
+    case "MOVE_LINKS_BROKEN":
+      // Play asks about this itself (launch.ts); this copy is for anywhere it isn't asked.
+      return "While the library move is paused, some active mods can't be opened from your mods folder. Resume the move from the notice at the top, then play.";
     case "ARCHIVE_UNAVAILABLE":
       return "Your library archive isn't available. Connect the drive, or choose another folder.";
     case "PERMISSION_DENIED":

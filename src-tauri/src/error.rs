@@ -21,6 +21,9 @@ pub mod code {
     pub const MOVE_UNFINISHED: &str = "MOVE_UNFINISHED";
     /// A library archive move is running right now (it can be paused): e.g. launching the game.
     pub const MOVE_RUNNING: &str = "MOVE_RUNNING";
+    /// A paused library archive move left active mods FS25 can't open from the mods folder
+    /// (#415): Play asks first, and starts the game only when asked again with "Play anyway".
+    pub const MOVE_LINKS_BROKEN: &str = "MOVE_LINKS_BROKEN";
     /// The game hasn't written this file yet (log.txt, inputBinding.xml): FS25 was never played
     /// with this user folder. Not a failure; the UI shows an empty state.
     pub const NO_LOG: &str = "NO_LOG";

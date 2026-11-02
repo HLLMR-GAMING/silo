@@ -14,10 +14,10 @@
     bisectSnapshotSave,
     bisectSnapshotGet,
     bisectSnapshotClear,
-    launchGame,
     logStatus,
     scanLog,
   } from "../api";
+  import { launchAsking } from "../launch";
   import { BISECT_RESTORE_FIRST, canStartBisect, finishBisect } from "../bisect";
   import type { BisectStep } from "../types";
   import { tooltip } from "../ui/tooltip";
@@ -203,7 +203,8 @@
     working = "Launching Farming Simulator 25…";
     error = null;
     try {
-      await launchGame(gameProfile);
+      // A paused library move that left mods unlinked asks first (#415).
+      await launchAsking(gameProfile);
     } catch (e) {
       // The round is still set up: the user can launch from Steam, or try again.
       error = inlineError(e, "Launching the game");
