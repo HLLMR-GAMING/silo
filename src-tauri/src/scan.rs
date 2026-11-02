@@ -1813,6 +1813,7 @@ mod layout_tests {
         assert_eq!(folder.tech_name, "FS25_A.zip");
         let archived = out.result.mods.iter().find(|m| m.organized).unwrap();
         assert_eq!(archived.tech_name, "FS25_A");
+        assert!(!archived.active, "the archived zip stays parked");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1972,22 +1973,32 @@ mod layout_tests {
 
     #[test]
     fn a_symlink_that_loses_its_target_leaves_the_archived_mod_parked() {
-        // A symlink needs Developer Mode (or admin) on Windows: skipped where it can't be made.
-        let probe = fresh("symlink_probe");
-        let usable = symlink_dir(&probe, &probe.join("l")).is_ok();
-        let _ = std::fs::remove_dir_all(&probe);
-        if !usable {
-            eprintln!("skipped: symlinks can't be made here");
-            return;
+        // On Windows a symlink needs the privilege to make one (Developer Mode, admin, or
+        // `SeCreateSymbolicLinkPrivilege`): skipped only without it, any other error fails.
+        // Elsewhere it's always made (the helper unwraps).
+        #[cfg(windows)]
+        {
+            const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+            let probe = fresh("symlink_probe");
+            let made = symlink_dir(&probe, &probe.join("l"));
+            let _ = std::fs::remove_dir_all(&probe);
+            match made {
+                Ok(()) => {}
+                Err(e) if e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => {
+                    eprintln!("skipped: no privilege to make a symlink here ({e})");
+                    return;
+                }
+                Err(e) => panic!("couldn't make a symlink: {e}"),
+            }
         }
         a_link_that_loses_its_target_turns_parked("lost_symlink", symlink_dir);
     }
 
-    /// #419: an entry FS25 can't open at an archived mod's name leaves that mod parked: a plain
-    /// file where a folder mod should be, or a folder without `modDesc.xml` where a zip should
-    /// be. Each is checked against a working projection first, so the mod was active. (A folder
-    /// *with* `modDesc.xml` at a zip's name is another mod, its own active row:
-    /// `a_folder_named_like_an_archived_zip_is_its_own_mod`.)
+    /// #419: an entry the scan doesn't take for a mod, at an archived mod's name, leaves that
+    /// mod parked, and gets no row of its own: a plain file where a folder mod should be, or a
+    /// folder without `modDesc.xml` where a zip should be. Each is checked against a working
+    /// projection first, so the mod was active. (A folder *with* `modDesc.xml` at a zip's name
+    /// is another mod, its own active row: `a_folder_named_like_an_archived_zip_is_its_own_mod`.)
     #[test]
     fn an_entry_that_isnt_a_mod_leaves_the_archived_mod_parked() {
         let base = fresh("not_a_mod");
@@ -2006,6 +2017,8 @@ mod layout_tests {
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::write(&dir, b"x").unwrap();
         assert!(!archived_row(&mods, &arch, "FS25_Dir").active);
+        let rows = scan_one(&mods, &arch).result.mods;
+        assert!(rows.iter().all(|m| Path::new(&m.path) != dir), "{rows:?}");
 
         // A zip mod: a hardlink, then a folder without modDesc.xml in its place.
         moddesc_zip(&cat.join("FS25_Zip.zip"), "Zip");
@@ -2015,6 +2028,9 @@ mod layout_tests {
         std::fs::remove_file(&zip).unwrap();
         std::fs::create_dir_all(&zip).unwrap();
         assert!(!archived_row(&mods, &arch, "FS25_Zip").active);
+        // Nor is the folder a mod of its own: no row reads it.
+        let rows = scan_one(&mods, &arch).result.mods;
+        assert!(rows.iter().all(|m| Path::new(&m.path) != zip), "{rows:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
