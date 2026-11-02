@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-02
+
+This release includes a **security fix**: a folder mod could make Silo read files outside the
+mod's own folder (see Security below). Updating is recommended.
+
+The library database upgrades to version 5. Before upgrading, Silo tries to save a copy of the
+old database in `db-snapshots` (`silo-before-v3.db` when you update from 1.0.3). If a copy by
+that name is already there, Silo keeps it as it is; if the copy can't be made (a full disk, say),
+the upgrade still goes ahead. Silo 1.0.3 can't open the upgraded database, so going back to 1.0.3
+after updating isn't supported.
+
 ### Added
 
 - **Conflicts** now checks your active mods against the map's **ground-pile slots**, the fixed
@@ -73,8 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when you check for updates (or after a scan, if Silo checks at startup), provided exactly one
   catalog entry published those exact bytes under that file name. You no longer have to remove
   it and install it again to get its drawer details, update checks and **Verify integrity**.
-  This needs Silo's catalog to look mods up by their files, which it doesn't yet; until then
-  nothing changes. (#402)
+  (#402)
 - Clicking **Connect**, **Cancel** or **Disconnect** for GitHub in quick succession now always
   reaches Silo in the order you clicked. Before, cancelling a sign-in and connecting or
   disconnecting right after could arrive the other way round. (#403)
@@ -240,7 +250,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates your active mods. (#343)
 - Moving a mod to another drive (Organize, Flatten) now writes the copy to disk before deleting
   the original, so a power cut right after the move can't lose the mod. (#343)
-- Folder mods can no longer make Silo read files outside the mod's own folder.
 - Turning on a mod whose name in your mods folder is taken by a different build now tells you
   so, by file name, instead of quietly skipping it. And if Silo closed between putting a mod in
   your mods folder and noting it as on, turning it on again now marks it on (and parking a mod
@@ -350,6 +359,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Security fix:** a folder mod could make Silo read files outside the mod's own folder,
+  through file paths in its `modDesc.xml` (its icon, store items, map or fill-type lists) that
+  climb out of the folder, name another drive, or go through a link. Silo now opens only plain
+  files inside the mod's folder. Zip mods weren't affected. (#362)
 - Release builds now use exactly the dependency versions in the committed lockfile, the ones the
   security audit and the software bill of materials check. A release is refused unless its tag
   matches the app version, and pre-release tags can no longer become a stable release. Each
@@ -1318,5 +1331,6 @@ First public beta.
   game-install discovery. Automatic mods-folder detection covers Windows and macOS;
   on Linux (Proton) the mods folder is set manually for now.
 
-[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.3...v1.0.4
 [0.1.0]: https://github.com/HLLMR-VENTURES/silo/releases/tag/v0.1.0
