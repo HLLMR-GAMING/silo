@@ -4,21 +4,29 @@
 // note already there, so it stops at one.
 
 /**
- * @param isScanning whether a scan is running now (it is then followed by one more)
+ * The one more scan, started only once no scan cycle runs: a cycle is a scan and the auto-filing
+ * after it, whose own scan (a nested cycle) shows what it filed. A rescan started in the middle
+ * could show the library from before the filing, with nothing after it to correct that.
  * @param rescan start a scan
  */
-export function noteRescanner(isScanning: () => boolean, rescan: () => void) {
+export function noteRescanner(rescan: () => void) {
   let due = false;
+  let cycles = 0;
   return {
     /** A foreign-file check finished with `found`: rescan when it noted a file just now. */
     checked(found: readonly { newlyNoted: boolean }[]): void {
       if (!found.some((f) => f.newlyNoted)) return;
-      if (isScanning()) due = true;
+      if (cycles > 0) due = true;
       else rescan();
     },
-    /** A scan ended: start the one a check asked for while it ran. */
+    /** A scan cycle started (a scan was let run). */
+    scanStarted(): void {
+      cycles++;
+    },
+    /** A scan cycle ended, its auto-filing included: the last one starts a rescan asked for meanwhile. */
     scanEnded(): void {
-      if (!due) return;
+      cycles = Math.max(0, cycles - 1);
+      if (cycles > 0 || !due) return;
       due = false;
       rescan();
     },
@@ -30,7 +38,6 @@ interface CheckerOptions<T> {
   detect: (root: string | undefined) => Promise<T[]>;
   /** The mods folder shown now. */
   root: () => string | undefined;
-  isScanning: () => boolean;
   rescan: () => void;
   /** A check started: the last answer no longer matches the scan. */
   started: () => void;
@@ -45,7 +52,7 @@ interface CheckerOptions<T> {
  * for none.
  */
 export function foreignChecker<T extends { newlyNoted: boolean }>(o: CheckerOptions<T>) {
-  const notes = noteRescanner(o.isScanning, o.rescan);
+  const notes = noteRescanner(o.rescan);
   let gen = 0;
   return {
     async refresh(): Promise<void> {
@@ -62,6 +69,7 @@ export function foreignChecker<T extends { newlyNoted: boolean }>(o: CheckerOpti
     drop(): void {
       gen++;
     },
+    scanStarted: (): void => notes.scanStarted(),
     scanEnded: (): void => notes.scanEnded(),
   };
 }

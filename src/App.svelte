@@ -1454,7 +1454,6 @@
   const foreignCheck = foreignChecker<ForeignFile>({
     detect: (root) => detectForeignFiles(root),
     root: () => roots[0],
-    isScanning: () => scanning,
     rescan: () => void runScan(false),
     started: () => (foreignChecked = false),
     answered: (found, checked) => {
@@ -3744,6 +3743,8 @@
   async function runScan(auto = true, label?: string, heldByCaller = false) {
     if (scanning) return;
     if (!scanGate.admit(auto, heldByCaller)) return; // queued until the write ends
+    // From here to the end, auto-filing included, is one scan cycle (#436).
+    foreignCheck.scanStarted();
     const op = start(label ?? "Rescanning your library", { quiet: !label });
     scanOp = op;
     scanning = true;
@@ -3807,15 +3808,18 @@
       op.end();
       scanOp = null;
     }
-    foreignCheck.scanEnded();
     // Auto-file any mods still loose in the flat root (e.g. freshly downloaded),
     // keeping them active so filing is transparent to the game.
     // Never auto-file mid-move: library writes are refused until the move finishes. Never after
     // a failed scan either: `mods` and `activeSet` are still the last scan's (#358).
-    if (scanned && auto && autoFileNew && !archiveMove.unfinished) {
-      if (mods.some(isFileable)) {
-        await autoFile();
+    try {
+      if (scanned && auto && autoFileNew && !archiveMove.unfinished) {
+        if (mods.some(isFileable)) {
+          await autoFile();
+        }
       }
+    } finally {
+      foreignCheck.scanEnded();
     }
   }
 

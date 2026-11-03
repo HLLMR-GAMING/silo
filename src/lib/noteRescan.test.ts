@@ -4,27 +4,40 @@ import { foreignChecker, noteRescanner } from "./noteRescan";
 describe("noteRescanner (#436)", () => {
   it("rescans once when a check noted a file, not when it found nothing new", () => {
     const rescan = vi.fn();
-    const r = noteRescanner(() => false, rescan);
+    const r = noteRescanner(rescan);
     r.checked([{ newlyNoted: false }]);
     r.checked([]);
     expect(rescan).not.toHaveBeenCalled();
     r.checked([{ newlyNoted: false }, { newlyNoted: true }]);
     expect(rescan).toHaveBeenCalledOnce();
+    r.scanStarted();
     r.scanEnded();
     expect(rescan).toHaveBeenCalledOnce();
   });
 
   it("follows a scan still running with one more", () => {
-    let scanning = true;
     const rescan = vi.fn();
-    const r = noteRescanner(() => scanning, rescan);
+    const r = noteRescanner(rescan);
+    r.scanStarted();
     r.checked([{ newlyNoted: true }]);
     r.checked([{ newlyNoted: true }]);
     expect(rescan).not.toHaveBeenCalled();
-    scanning = false;
     r.scanEnded();
     expect(rescan).toHaveBeenCalledOnce();
+    r.scanStarted();
     r.scanEnded();
+    expect(rescan).toHaveBeenCalledOnce();
+  });
+
+  it("waits for the auto-filing after a scan, and its own scan, before rescanning", () => {
+    const rescan = vi.fn();
+    const r = noteRescanner(rescan);
+    r.scanStarted(); // the scan that found loose mods
+    r.checked([{ newlyNoted: true }]); // its check lands while auto-filing runs
+    r.scanStarted(); // the scan after filing (nested)
+    r.scanEnded();
+    expect(rescan).not.toHaveBeenCalled(); // still inside the first cycle
+    r.scanEnded(); // filing and its scan done
     expect(rescan).toHaveBeenCalledOnce();
   });
 });
@@ -35,25 +48,16 @@ describe("foreignChecker (#358, #436)", () => {
   function harness() {
     const pending: { root: string | undefined; answer: (f: Found[]) => void }[] = [];
     let root: string | undefined = "C:/mods";
-    let scanning = false;
     const rescan = vi.fn();
     const answered = vi.fn();
     const check = foreignChecker<Found>({
       detect: (r) => new Promise((resolve) => pending.push({ root: r, answer: resolve })),
       root: () => root,
-      isScanning: () => scanning,
       rescan,
       started: () => {},
       answered,
     });
-    return {
-      check,
-      pending,
-      rescan,
-      answered,
-      setRoot: (r: string) => (root = r),
-      setScanning: (v: boolean) => (scanning = v),
-    };
+    return { check, pending, rescan, answered, setRoot: (r: string) => (root = r) };
   }
   const noted = (fileName: string, newlyNoted: boolean): Found => ({ fileName, newlyNoted });
 
@@ -82,14 +86,13 @@ describe("foreignChecker (#358, #436)", () => {
     expect(h.answered).not.toHaveBeenCalled();
   });
 
-  it("a note found while a scan runs waits for it to end", async () => {
+  it("a note found during a scan cycle waits for it to end", async () => {
     const h = harness();
-    h.setScanning(true);
+    h.check.scanStarted();
     const run = h.check.refresh();
     h.pending[0].answer([noted("FS25_A.zip", true)]);
     await run;
     expect(h.rescan).not.toHaveBeenCalled();
-    h.setScanning(false);
     h.check.scanEnded();
     expect(h.rescan).toHaveBeenCalledOnce();
   });
