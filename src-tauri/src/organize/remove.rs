@@ -109,6 +109,81 @@ pub fn plan_removal(
     requests: &[RemoveRequest],
     archive_ok: bool,
 ) -> (RemovalPlan, Vec<(Planned, Evidence)>) {
+    plan_removal_keeping(conn, layout, requests, None, archive_ok)
+}
+
+/// The copy of a mod the user keeps while the others are removed (#423), as it was when they
+/// confirmed: checked again before anything is parked or moved, and never touched.
+#[derive(Debug, Clone)]
+pub struct Keeper {
+    path: PathBuf,
+    roots: Vec<PathBuf>,
+    evidence: Evidence,
+}
+
+/// Check the copy the user keeps (`keep`, the path the Library shows for it): a real file or folder
+/// in the mods folder or directly in a category folder of the archive, and record what it is.
+pub fn keeper(layout: &Layout, keep: &RemoveRequest) -> Result<Keeper, String> {
+    let path = PathBuf::from(&keep.path);
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let roots = if parent == layout.mods {
+        really_at(&path, &layout.mods, None)?;
+        vec![layout.mods.clone()]
+    } else if parent.parent() == Some(layout.archive.as_path()) {
+        really_at(&path, &parent, Some(&layout.archive))?;
+        vec![layout.mods.clone(), layout.archive.clone(), parent]
+    } else {
+        return Err("the copy you're keeping isn't in your mods folder or your library".into());
+    };
+    let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    let evidence = evidence_of(&path, &refs)?;
+    Ok(Keeper {
+        path,
+        roots,
+        evidence,
+    })
+}
+
+/// The kept copy is still what it was when the user confirmed.
+fn keeper_unchanged(k: &Keeper) -> bool {
+    let refs: Vec<&Path> = k.roots.iter().map(PathBuf::as_path).collect();
+    evidence_of(&k.path, &refs).is_ok_and(|now| now == k.evidence)
+}
+
+/// Why removing `planned` (with its evidence and library row, if any) would touch the kept copy:
+/// it is that copy, the same file under another name, or the library mod whose link in the mods
+/// folder the kept copy is.
+fn touches_keeper(
+    layout: &Layout,
+    k: &Keeper,
+    planned: &Planned,
+    evidence: &Evidence,
+    row: Option<&OrganizedRow>,
+) -> Option<String> {
+    if Path::new(&planned.path) == k.path {
+        return Some("that's the copy you're keeping".into());
+    }
+    if evidence.entry.is_some() && evidence.entry == k.evidence.entry {
+        return Some("it's the same file as the copy you're keeping".into());
+    }
+    let keeps_slot = row.is_some_and(|r| {
+        k.path.parent() == Some(layout.mods.as_path())
+            && k.path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&r.file_name))
+    });
+    keeps_slot.then(|| "the copy you're keeping is Silo's link to it in your mods folder".into())
+}
+
+/// [`plan_removal`] keeping `keep` (#423): a request that is the kept copy, or would touch it, is
+/// refused.
+pub fn plan_removal_keeping(
+    conn: &Connection,
+    layout: &Layout,
+    requests: &[RemoveRequest],
+    keep: Option<&Keeper>,
+    archive_ok: bool,
+) -> (RemovalPlan, Vec<(Planned, Evidence)>) {
     let key = crate::modsroot::canonical_key(&layout.mods);
     let mut plan = RemovalPlan::default();
     let mut found = Vec::new();
@@ -126,7 +201,14 @@ pub fn plan_removal(
     };
     let mut seen = HashSet::new();
     for r in requests.iter().filter(|r| seen.insert(r.path.clone())) {
-        match check(layout, &rows, r, archive_ok) {
+        let checked = check(layout, &rows, r, archive_ok).and_then(|(planned, evidence)| {
+            let row = library_row(layout, &rows, r);
+            match keep.and_then(|k| touches_keeper(layout, k, &planned, &evidence, row)) {
+                Some(why) => Err(format!("{why}, so Silo left it.")),
+                None => Ok((planned, evidence)),
+            }
+        });
+        match checked {
             Ok(pair) => {
                 plan.items.push(pair.0.clone());
                 found.push(pair);
@@ -148,6 +230,7 @@ pub fn carry_out(
     conn: &Connection,
     layout: &Layout,
     planned: &[(Planned, Evidence)],
+    keep: Option<&Keeper>,
     archive_ok: bool,
     bin: &dyn Fn(&Path) -> Binned,
 ) -> RemoveReport {
@@ -165,6 +248,19 @@ pub fn carry_out(
             return rep;
         }
     };
+
+    // The copy the user keeps must still be the one they confirmed, or nothing goes (#423).
+    let keeper_changed = || {
+        "the copy you're keeping changed since you confirmed, so Silo removed nothing. Try again."
+            .to_string()
+    };
+    if keep.is_some_and(|k| !keeper_unchanged(k)) {
+        for (p, _) in planned {
+            rep.errors
+                .push(format!("{}: {}", p.tech_name, keeper_changed()));
+        }
+        return rep;
+    }
 
     // Everything again, against what was confirmed: one that changed isn't parked either.
     let still_confirmed = |p: &Planned, confirmed: &Evidence| -> Result<(), String> {
@@ -225,6 +321,10 @@ pub fn carry_out(
         // Once more right before it moves: parking, or moving the ones before it, took a while.
         if let Err(why) = still_confirmed(p, confirmed) {
             rep.errors.push(format!("{name}: {why}"));
+            continue;
+        }
+        if keep.is_some_and(|k| !keeper_unchanged(k)) {
+            rep.errors.push(format!("{name}: {}", keeper_changed()));
             continue;
         }
         let gone = match bin(&path) {
@@ -360,6 +460,41 @@ fn check_archived_copy(
     }
     let category = path.parent().map(Path::to_path_buf).unwrap_or_default();
     really_at(&path, &category, Some(&layout.archive))?;
+    // A recorded copy under another spelling (`vehicles` for `Vehicles`) is that row's, never a
+    // second copy: compared by which file it is, not by how the path is written.
+    let here = crate::scratch::entry_number(&path)
+        .ok_or_else(|| format!("Silo couldn't check which file {name} is, so it left it alone."))?;
+    for row in rows {
+        let recorded = archive_path(&layout.archive, &row.category, &row.file_name);
+        if crate::scratch::entry_number(&recorded) == Some(here) {
+            return Err(format!(
+                "{name} is the copy recorded in your library, so Silo left it. Remove it from its own entry."
+            ));
+        }
+    }
+    // The game may load this copy through Silo's link at its name: then it isn't the spare one.
+    let slot = layout.mods.join(&name);
+    match slot.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "Silo couldn't check {name} in your mods folder ({e}), so it left it alone."
+            ))
+        }
+        Ok(_) => match projection_verdict(&slot, &path, if meta.is_dir() { "dir" } else { "zip" }) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(format!(
+                    "the game loads this copy, through Silo's link in your mods folder, so Silo left it. Keep this one, or park the mod first."
+                ))
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Silo couldn't check whether the game loads {name} ({e}), so it left it alone."
+                ))
+            }
+        },
+    }
     let evidence = evidence_of(&path, &[&layout.mods, &layout.archive, &category])?;
     Ok((
         Planned {

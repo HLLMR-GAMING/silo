@@ -156,8 +156,8 @@
   } from "./lib/state/ops.svelte";
   import { createScanSettler, focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
   import { describeError, formatDetail, isWindowsPlatform, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
-  import { removeConfirmText, removedText, removeVerb } from "./lib/removeMods";
-  import { duplicateCopies } from "./lib/duplicates";
+  import { keepConfirmText, removeConfirmText, removedText, removeVerb } from "./lib/removeMods";
+  import { copyPlace, duplicateCopies } from "./lib/duplicates";
   import {
     info,
     inlineError,
@@ -336,6 +336,9 @@
   let foreignFiles = $state<ForeignFile[]>([]);
   /** Bumped by every foreign-file check and by a folder switch: an older check's answer is dropped. */
   let foreignGen = 0;
+  /** The foreign-file check matches the current scan: until it does, copies at a mod's name
+   *  can't be told from foreign files, so Problems lists no duplicates to act on (#423). */
+  let foreignChecked = $state(false);
   let scanning = $state(false);
   // The last scan failed (its notice is up): the status chip says so instead of "All good".
   let scanFailed = $state(false);
@@ -833,10 +836,12 @@
     }
     // More than one copy of a tech name (#423), unless it's a different build at the mod's own
     // name: that has its own section and choices.
-    const duplicates = duplicateCopies(
-      mods,
-      foreignFiles.map((f) => f.fileName),
-    );
+    const duplicates = foreignChecked
+      ? duplicateCopies(
+          mods,
+          foreignFiles.map((f) => f.fileName),
+        )
+      : [];
     return { missingDeps, corrupt, ignored, foreign: foreignFiles, duplicates };
   });
   const healthCount = $derived(
@@ -1448,8 +1453,13 @@
   async function refreshForeignFiles(): Promise<void> {
     const gen = ++foreignGen;
     const root = roots[0];
-    const found = await detectForeignFiles(root).catch(() => []);
-    if (gen === foreignGen && roots[0] === root) foreignFiles = found;
+    foreignChecked = false;
+    let checked = true;
+    const found = await detectForeignFiles(root).catch(() => ((checked = false), []));
+    if (gen === foreignGen && roots[0] === root) {
+      foreignFiles = found;
+      foreignChecked = checked;
+    }
   }
 
   // Build the organize inputs for every loose (unorganized) zip currently in view.
@@ -2743,7 +2753,10 @@
     // Step one: Silo checks each mod and notes what it is; the confirmation names what it found.
     let planned: [number, RemovalPlan];
     try {
-      planned = await planRemoval(list.map((m) => ({ techName: m.techName, path: m.path })));
+      planned = await planRemoval(
+        list.map((m) => ({ techName: m.techName, path: m.path })),
+        keep ? { techName: keep.techName, path: keep.path } : undefined,
+      );
     } catch (e) {
       reportError(e, "Removing mods from the library");
       return;
@@ -2755,15 +2768,19 @@
     }
     const titles = new Map(list.map((m) => [m.path, m.title]));
     const removing = plan.items.map((p) => ({ ...p, title: titles.get(p.path) ?? null }));
-    // Keeping one copy of a mod (#423): say which one stays.
-    const lead = keep ? `Keep ${fileName(keep.path)} (${keep.organized ? "in your library" : "in your mods folder"}). ` : "";
-    if (
-      !(await safeFirstDialog(lead + removeConfirmText(removing, windows), {
-        safe: "Cancel",
-        verb: removeVerb(windows),
-      }))
-    )
-      return;
+    // Keeping one copy of a mod (#423): which stays, which go, and what's on afterwards.
+    const byPath = new Map(list.map((m) => [m.path, m]));
+    const text = keep
+      ? keepConfirmText(
+          { fileName: fileName(keep.path), place: copyPlace(keep), loose: !keep.organized, on: isOn(keep) },
+          plan.items.map((p) => {
+            const m = byPath.get(p.path);
+            return { fileName: p.fileName, place: m ? copyPlace(m) : "", on: p.on && !!m && isOn(m) };
+          }),
+          windows,
+        )
+      : removeConfirmText(removing, windows);
+    if (!(await safeFirstDialog(text, { safe: "Cancel", verb: removeVerb(windows) }))) return;
     // Step two: anything that changed since is refused before it's touched.
     const op = beginWrite(plan.items.length === 1 ? "Removing a mod" : `Removing ${modsCount(plan.items.length)}`);
     if (!op) return;
@@ -3132,6 +3149,7 @@
     // offers (#358).
     foreignGen++;
     foreignFiles = [];
+    foreignChecked = false;
     for (const t of dropToasts.splice(0)) t.dismiss();
     // The last update check was of the other folder's files (and one still running is too).
     updateFolderGen++;

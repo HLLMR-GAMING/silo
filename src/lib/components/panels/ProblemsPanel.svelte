@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyPlace, entryName, loadedCopy } from "../../duplicates";
   // Diagnose → Problems (was Library health): mods that won't load as they are, each with what
   // to do about it.
   //   <ProblemsPanel {health} isActive={(t) => active.has(t)} onFindInBrowse={find}
@@ -54,9 +55,7 @@
     onKeepCopy,
   }: Props = $props();
   const duplicates = $derived(health.duplicates ?? []);
-  /** Where a copy is, in words. */
-  const where = (m: ModEntry) => (m.organized ? "in your library" : "in your mods folder");
-  const entry = (m: ModEntry) => m.path.split(/[\\/]/).pop() ?? m.path;
+  const entry = (m: ModEntry) => entryName(m.path);
 
   const total = $derived(
     health.missingDeps.length +
@@ -133,7 +132,7 @@
             {#each g.copies as c (c.path)}
               <li class="copy">
                 <span class="copy-what">
-                  <code>{entry(c)}</code>, {where(c)}, {ver(c.version)}{#if loadsNow(c)}<span class="loads">
+                  <code>{entry(c)}</code>, {copyPlace(c)}, {ver(c.version)}{#if loadedCopy(g.copies, loadsNow) === c}<span class="loads">
                       · the game loads this one</span
                     >{/if}
                 </span>

@@ -444,8 +444,12 @@ export function setActive(active: string[], touched?: string[]): Promise<Organiz
 
 /** Remove from library, step one (#429): check the mods (by the path the Library shows) and note
  *  what each is. Nothing changes. Returns the plan's id and what it will remove. */
-export function planRemoval(items: { techName: string; path: string }[]): Promise<[number, RemovalPlan]> {
-  return invoke<[number, RemovalPlan]>("plan_removal", { items });
+export function planRemoval(
+  items: { techName: string; path: string }[],
+  keep?: { techName: string; path: string },
+): Promise<[number, RemovalPlan]> {
+  // `keep`: the copy kept when the others are removed (#423); nothing may touch it.
+  return invoke<[number, RemovalPlan]>("plan_removal", { items, keep: keep ?? null });
 }
 
 /** Remove from library, step two (#429): carry out the confirmed plan. Files go to the Recycle

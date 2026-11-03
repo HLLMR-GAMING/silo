@@ -34,7 +34,7 @@ fn remove(
     bin: &dyn Fn(&Path) -> Binned,
 ) -> (RemovalPlan, RemoveReport) {
     let (plan, found) = plan_removal(conn, layout, reqs, archive_ok);
-    let rep = carry_out(conn, layout, &found, archive_ok, bin);
+    let rep = carry_out(conn, layout, &found, None, archive_ok, bin);
     (plan, rep)
 }
 
@@ -229,7 +229,7 @@ fn a_later_item_replaced_while_an_earlier_one_moves_is_refused() {
         std::fs::write(&b, b"PK another B, same!").unwrap();
         bin_at(&bin)(p)
     };
-    let rep = carry_out(&conn, &layout, &found, true, &slow_bin);
+    let rep = carry_out(&conn, &layout, &found, None, true, &slow_bin);
     assert_eq!(moved.get(), 1);
     assert_eq!(rep.removed.len(), 1);
     assert!(
@@ -451,7 +451,7 @@ fn changed_while_confirming(
     let (plan, found) = plan_removal(conn, layout, reqs, true);
     assert_eq!(plan.items.len(), reqs.len(), "{:?}", plan.refused);
     between();
-    carry_out(conn, layout, &found, true, &no_bin)
+    carry_out(conn, layout, &found, None, true, &no_bin)
 }
 
 #[test]
@@ -633,7 +633,7 @@ fn a_slot_silo_cant_inspect_refuses() {
         let _ = std::fs::remove_dir_all(&base);
         return;
     }
-    let rep = carry_out(&conn, &layout, &found, true, &no_bin);
+    let rep = carry_out(&conn, &layout, &found, None, true, &no_bin);
     std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(rep.removed.is_empty());
     assert!(!rep.errors.is_empty(), "refused");
@@ -689,5 +689,135 @@ fn a_second_archived_copy_without_a_row_can_be_removed() {
     assert!(plan.items.is_empty());
     assert_eq!(plan.refused.len(), 2, "{:?}", plan.refused);
     assert!(other_cat.join("FS25_Bar.zip").is_file() && other_cat.join("notes.zip").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The parked library copy of FS25_Foo plus an unzipped FS25_Foo folder in the mods folder.
+fn foo_twice(tag: &str) -> (PathBuf, Connection, Layout, PathBuf, PathBuf) {
+    let (base, conn, layout, src) = library_with_foo(tag, false);
+    let folder = layout.mods.join("FS25_Foo");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+    (base, conn, layout, src, folder)
+}
+
+#[test]
+fn keeping_one_copy_removes_the_other_and_never_the_kept_one() {
+    let (base, conn, layout, src, folder) = foo_twice("rm_keep");
+    let k = keeper(&layout, &req("FS25_Foo", &folder)).unwrap();
+    let reqs = [req("FS25_Foo", &src), req("FS25_Foo", &folder)];
+    let (plan, found) = plan_removal_keeping(&conn, &layout, &reqs, Some(&k), true);
+    assert_eq!(plan.items.len(), 1, "{:?}", plan.refused);
+    assert!(
+        plan.refused[0].contains("that's the copy you're keeping"),
+        "{:?}",
+        plan.refused
+    );
+    let bin = base.join("bin");
+    let rep = carry_out(&conn, &layout, &found, Some(&k), true, &bin_at(&bin));
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert!(bin.join("FS25_Foo.zip").is_file());
+    assert!(folder.join("modDesc.xml").is_file(), "the kept copy stays");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_kept_copy_gone_or_replaced_while_confirming_stops_everything() {
+    for replace in [false, true] {
+        let (base, conn, layout, src, folder) = foo_twice(if replace {
+            "rm_keep_swap"
+        } else {
+            "rm_keep_gone"
+        });
+        let k = keeper(&layout, &req("FS25_Foo", &folder)).unwrap();
+        let (_, found) =
+            plan_removal_keeping(&conn, &layout, &[req("FS25_Foo", &src)], Some(&k), true);
+        assert_eq!(found.len(), 1);
+        std::fs::remove_dir_all(&folder).unwrap();
+        if replace {
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+        }
+        let rep = carry_out(&conn, &layout, &found, Some(&k), true, &no_bin);
+        assert!(rep.removed.is_empty());
+        assert!(
+            rep.errors[0].contains("the copy you're keeping changed"),
+            "{:?}",
+            rep.errors
+        );
+        assert!(src.is_file(), "the other copy stays too");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[test]
+fn keeping_silos_link_to_a_library_copy_refuses_removing_that_copy() {
+    // The "copy" in the mods folder is Silo's link to the library copy: removing the library copy
+    // would park the mod, taking the kept one with it.
+    let (base, conn, layout, src) = library_with_foo("rm_keep_link", true);
+    let link = layout.mods.join("FS25_Foo.zip");
+    let k = keeper(&layout, &req("FS25_Foo", &link)).unwrap();
+    let (plan, found) =
+        plan_removal_keeping(&conn, &layout, &[req("FS25_Foo", &src)], Some(&k), true);
+    assert!(found.is_empty());
+    assert!(
+        plan.refused[0].contains("same file as the copy you're keeping")
+            || plan.refused[0].contains("Silo's link to it"),
+        "{:?}",
+        plan.refused
+    );
+    assert!(link.exists() && src.is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_second_archived_copy_the_game_loads_is_refused() {
+    // Two library copies; the recorded one parked, and the mods folder holding a byte-identical
+    // copy of the second (Silo's projection of it): the game loads the second, so it isn't spare.
+    let (base, conn, layout, _src) = library_with_foo("rm_second_loaded", false);
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let second = tools.join("FS25_Foo.zip");
+    std::fs::write(&second, b"PK the loaded second copy").unwrap();
+    std::fs::write(
+        layout.mods.join("FS25_Foo.zip"),
+        b"PK the loaded second copy",
+    )
+    .unwrap();
+    let (plan, _) = remove(&conn, &layout, &[req("FS25_Foo", &second)], true, &no_bin);
+    assert!(plan.items.is_empty());
+    assert!(
+        plan.refused[0].contains("the game loads this copy"),
+        "{:?}",
+        plan.refused
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// On a folder that ignores case, the recorded copy asked for under another spelling of its
+// category is that row's, never a "second copy" removed without parking or tidying its records.
+#[test]
+fn the_recorded_copy_under_another_spelling_is_not_a_second_copy() {
+    let (base, conn, layout, src) = library_with_foo("rm_spelling", false);
+    let respelled = layout.archive.join("VEHICLES").join("FS25_Foo.zip");
+    if !respelled.exists() {
+        // A folder that tells case apart: that spelling is no file at all.
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    let (plan, _) = remove(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &respelled)],
+        true,
+        &no_bin,
+    );
+    assert!(plan.items.is_empty());
+    assert!(
+        plan.refused[0].contains("the copy recorded in your library"),
+        "{:?}",
+        plan.refused
+    );
+    assert!(src.is_file());
     let _ = std::fs::remove_dir_all(&base);
 }

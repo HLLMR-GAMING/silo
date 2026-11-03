@@ -145,7 +145,7 @@ describe("Problems", () => {
     expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("1 mod needs attention");
     expect(screen.getByRole("heading", { level: 4 })).toHaveTextContent("More than one copy of a mod (1)");
     const copies = screen.getAllByRole("listitem").filter((li) => li.classList.contains("copy"));
-    expect(copies[0]).toHaveTextContent("FS25_Foo.zip, in your library, 1.0");
+    expect(copies[0]).toHaveTextContent("FS25_Foo.zip, in your library, Vehicles, 1.0");
     expect(copies[1]).toHaveTextContent("FS25_Foo, in your mods folder");
     expect(copies[1]).toHaveTextContent("the game loads this one");
     expect(copies[0]).not.toHaveTextContent("the game loads this one");
