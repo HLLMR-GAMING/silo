@@ -146,39 +146,97 @@ fn baseline(bin: &Path) -> Option<Baseline> {
     ))
 }
 
-/// This move's receipt in `bin`: a `$I` record that wasn't there `before` (in a user folder read
-/// whole then, or one that's new since), names `original` (compared as [`plain`]), and whose `$R`
-/// payload is there, the same kind and, for a file, the same size. An older record for the same
-/// path (an earlier removal) never counts.
+/// What looking for a move's receipt found.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(not(windows), allow(dead_code))]
-fn receipt(bin: &Path, before: &Baseline, original: &str, was_dir: bool, size: u64) -> bool {
+enum Receipt {
+    /// This move's record and payload are in the bin.
+    Found,
+    /// Everything that could hold it was read, and it isn't there.
+    Absent,
+    /// Something that could hold it couldn't be read: no conclusion.
+    Unknown,
+}
+
+/// Look for this move's receipt in `bin`: a `$I` record that wasn't there `before` (in a user
+/// folder read whole then, or one that's new since), names `original` (compared as [`plain`]),
+/// and whose `$R` payload is there, the same kind and, for a file, the same size. An older record
+/// for the same path (an earlier removal) never counts. `Absent` only when every place it could be
+/// was read; any folder, record or payload that couldn't be read makes it `Unknown`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn receipt(bin: &Path, before: &Baseline, original: &str, was_dir: bool, size: u64) -> Receipt {
     let Some(now) = user_folders(bin) else {
-        return false;
+        return Receipt::Unknown;
     };
-    now.iter().any(|dir| {
+    let mut unknown = false;
+    for dir in &now {
         let old = match before.0.get(dir) {
             Some(Some(listed)) => listed.clone(),
-            Some(None) => return false, // couldn't be read whole before: can't tell new from old
-            None => HashSet::new(),     // new since: everything in it is new
+            // Couldn't be read whole before: new can't be told from old there.
+            Some(None) => {
+                unknown |= listed_records(dir).is_some();
+                continue;
+            }
+            None => HashSet::new(), // new since: everything in it is new
         };
         let Some(records) = listed_records(dir) else {
-            return false;
+            unknown = true;
+            continue;
         };
-        records.into_iter().filter(|r| !old.contains(r)).any(|r| {
-            let named = std::fs::read(&r).ok().and_then(|b| i_record_path(&b));
-            if !named.is_some_and(|n| plain(&n) == original) {
-                return false;
+        for r in records.into_iter().filter(|r| !old.contains(r)) {
+            let Ok(bytes) = std::fs::read(&r) else {
+                unknown = true;
+                continue;
+            };
+            let Some(named) = i_record_path(&bytes) else {
+                unknown = true; // a record Silo can't read might be this one
+                continue;
+            };
+            if plain(&named) != original {
+                continue;
             }
             let name = r
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let payload = r.with_file_name(format!("$R{}", &name[2..]));
-            payload.symlink_metadata().is_ok_and(|m| {
-                !m.file_type().is_symlink() && m.is_dir() == was_dir && (was_dir || m.len() == size)
-            })
-        })
-    })
+            match payload.symlink_metadata() {
+                Ok(m)
+                    if !m.file_type().is_symlink()
+                        && m.is_dir() == was_dir
+                        && (was_dir || m.len() == size) =>
+                {
+                    return Receipt::Found
+                }
+                // Its record without a matching payload: not a recycled copy of it.
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => unknown = true,
+            }
+        }
+    }
+    if unknown {
+        Receipt::Unknown
+    } else {
+        Receipt::Absent
+    }
+}
+
+/// What became of an item that's confirmed gone from its folder, from what looking for its
+/// receipt found (`None`: the bin couldn't be found or read before the move). Only a complete
+/// look that found nothing says it was deleted permanently; anything inconclusive says so.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn gone_outcome(looked: Option<Receipt>) -> Binned {
+    match looked {
+        Some(Receipt::Found) => Binned::Recycled,
+        Some(Receipt::Absent) => Binned::Gone(
+            "Windows deleted it permanently instead of moving it to the Recycle Bin".into(),
+        ),
+        Some(Receipt::Unknown) | None => Binned::Gone(
+            "it's gone, but Silo couldn't confirm it went to the Recycle Bin, so look for it there"
+                .into(),
+        ),
+    }
 }
 
 #[cfg(windows)]
@@ -209,20 +267,12 @@ mod windows {
             }
             Err(_) => {}
         }
-        match (bin, before) {
-            (Some(bin), Some(before))
-                if receipt(&bin, &before, &original, meta.is_dir(), meta.len()) =>
-            {
-                Binned::Recycled
+        gone_outcome(match (bin, before) {
+            (Some(bin), Some(before)) => {
+                Some(receipt(&bin, &before, &original, meta.is_dir(), meta.len()))
             }
-            (Some(_), Some(_)) => Binned::Gone(
-                "Windows deleted it permanently instead of moving it to the Recycle Bin".into(),
-            ),
-            _ => Binned::Gone(
-                "it's gone, but Silo couldn't read the Recycle Bin to see whether it went there"
-                    .into(),
-            ),
-        }
+            _ => None,
+        })
     }
 
     /// The `$Recycle.Bin` folder of `p`'s drive.
@@ -299,19 +349,20 @@ mod tests {
         std::fs::write(user.join("$IOLD111.zip"), record(r"C:\mods\FS25_Foo.zip")).unwrap();
         std::fs::write(user.join("$ROLD111.zip"), b"PK old").unwrap();
         let before = baseline(&bin).unwrap();
-        assert!(
-            !receipt(&bin, &before, &original, false, 6),
+        assert_eq!(
+            receipt(&bin, &before, &original, false, 6),
+            Receipt::Absent,
             "an older record never counts"
         );
         // A new record whose payload is missing, or the wrong size, doesn't count either.
         std::fs::write(user.join("$INEW222.zip"), record(r"C:\mods\FS25_Foo.zip")).unwrap();
-        assert!(!receipt(&bin, &before, &original, false, 6));
+        assert_eq!(receipt(&bin, &before, &original, false, 6), Receipt::Absent);
         std::fs::write(user.join("$RNEW222.zip"), b"PK other size").unwrap();
-        assert!(!receipt(&bin, &before, &original, false, 6));
+        assert_eq!(receipt(&bin, &before, &original, false, 6), Receipt::Absent);
         // Another path's new record doesn't count.
         std::fs::write(user.join("$IOTH333.zip"), record(r"C:\mods\FS25_Bar.zip")).unwrap();
         std::fs::write(user.join("$ROTH333.zip"), b"PK new").unwrap();
-        assert!(!receipt(&bin, &before, &original, false, 6));
+        assert_eq!(receipt(&bin, &before, &original, false, 6), Receipt::Absent);
         // Its own new record with its payload: the receipt (the prefix and case don't matter).
         std::fs::write(
             user.join("$IMINE44.zip"),
@@ -319,7 +370,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(user.join("$RMINE44.zip"), b"PK new").unwrap();
-        assert!(receipt(&bin, &before, &original, false, 6));
+        assert_eq!(receipt(&bin, &before, &original, false, 6), Receipt::Found);
         let _ = std::fs::remove_dir_all(&bin);
     }
 
@@ -333,13 +384,10 @@ mod tests {
         std::fs::create_dir_all(&user).unwrap();
         std::fs::write(user.join("$IAAA111.zip"), record(r"C:\mods\FS25_Foo.zip")).unwrap();
         std::fs::write(user.join("$RAAA111.zip"), b"PK").unwrap();
-        assert!(receipt(
-            &bin,
-            &before,
-            &plain(r"C:\mods\FS25_Foo.zip"),
-            false,
-            2
-        ));
+        assert_eq!(
+            receipt(&bin, &before, &plain(r"C:\mods\FS25_Foo.zip"), false, 2),
+            Receipt::Found
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -360,14 +408,58 @@ mod tests {
             let _ = std::fs::remove_dir_all(&bin);
             return;
         }
-        assert!(!receipt(
-            &bin,
-            &before,
-            &plain(r"C:\mods\FS25_Foo.zip"),
-            false,
-            2
-        ));
+        let looked = receipt(&bin, &before, &plain(r"C:\mods\FS25_Foo.zip"), false, 2);
+        assert_eq!(
+            looked,
+            Receipt::Unknown,
+            "never a receipt, and never proof of absence"
+        );
+        assert!(
+            matches!(gone_outcome(Some(looked)), Binned::Gone(ref m) if m.contains("couldn't confirm"))
+        );
         let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    #[test]
+    fn only_a_complete_look_says_deleted_permanently() {
+        assert_eq!(gone_outcome(Some(Receipt::Found)), Binned::Recycled);
+        assert!(
+            matches!(gone_outcome(Some(Receipt::Absent)), Binned::Gone(ref m) if m.contains("deleted it permanently"))
+        );
+        for inconclusive in [Some(Receipt::Unknown), None] {
+            match gone_outcome(inconclusive) {
+                Binned::Gone(m) => {
+                    assert!(
+                        m.contains("couldn't confirm") && !m.contains("permanently"),
+                        "{m}"
+                    )
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unreadable_new_record_or_a_bin_gone_after_is_inconclusive() {
+        let bin = temp("receipt_unknown");
+        let user = bin.join("S-1-5-21-test");
+        std::fs::create_dir_all(&user).unwrap();
+        let before = baseline(&bin).unwrap();
+        let original = plain(r"C:\mods\FS25_Foo.zip");
+        // A new record Silo can't make sense of might be this move's.
+        std::fs::write(user.join("$IBAD111.zip"), b"not a record").unwrap();
+        assert_eq!(
+            receipt(&bin, &before, &original, false, 2),
+            Receipt::Unknown
+        );
+        // The bin can't be read after the move at all.
+        let _ = std::fs::remove_dir_all(&bin);
+        std::fs::write(&bin, b"now a file, not a folder").unwrap();
+        assert_eq!(
+            receipt(&bin, &before, &original, false, 2),
+            Receipt::Unknown
+        );
+        let _ = std::fs::remove_file(&bin);
     }
 
     #[test]
