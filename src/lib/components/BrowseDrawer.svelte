@@ -122,7 +122,7 @@
     </div>
     <div class="drawer-body">
       {#if cover}
-        <img class="drawer-img" src={cover} alt="" />
+        <img class="drawer-img" src={cover} alt="" onerror={() => (cover = "")} />
       {/if}
       <dl class="facts">
         {#if d.category}<dt>Category</dt><dd>{d.category}</dd>{/if}

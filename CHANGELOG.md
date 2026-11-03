@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A leftover temporary file Silo can't prove it made is now noted in the log once per session,
+  instead of on every scan. (#428)
+- When Browse can't load a mod's picture (the image host is down, say), the card shows its letter
+  placeholder and the details drop the picture, instead of a broken-image icon. (#428)
+
+### Fixed
+
 - The installed app no longer blocks its own connection to Silo's core, so every action takes the
   quick route instead of a slower fallback, and the developer console no longer fills with
   security-policy errors that could hide real ones. (#425)

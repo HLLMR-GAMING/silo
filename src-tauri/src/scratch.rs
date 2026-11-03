@@ -860,8 +860,8 @@ pub(crate) fn kept_for(journal: &dyn Journal, paths: &[&Path]) -> Vec<PathBuf> {
 }
 
 /// Log each entry of `dir` whose name looks like Silo scratch (`is_scratch`) but isn't recorded
-/// in the journal: an older version's leftover, or not Silo's at all. Left in place. Returns
-/// them.
+/// in the journal: an older version's leftover, or not Silo's at all. Left in place. Each path is
+/// logged once per session (the scan sweeps every time, #428). Returns them all.
 pub(crate) fn log_unrecorded(
     journal: &dyn Journal,
     dir: &Path,
@@ -873,16 +873,28 @@ pub(crate) fn log_unrecorded(
         for e in rd.flatten() {
             let p = e.path();
             if is_scratch(&e.file_name().to_string_lossy()) && !recorded.contains(&p) {
-                log::warn!(
-                    "left {} in place: it looks like a leftover from an earlier version of Silo, \
-                     and Silo can't prove it made it",
-                    p.display()
-                );
+                if first_sighting(&p) {
+                    log::warn!(
+                        "left {} in place: it looks like a leftover from an earlier version of \
+                         Silo, and Silo can't prove it made it",
+                        p.display()
+                    );
+                }
                 v.push(p);
             }
         }
     }
     v
+}
+
+/// True the first time `p` is passed in this session.
+fn first_sighting(p: &Path) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .map(|mut s| s.insert(p.to_path_buf()))
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -976,6 +988,10 @@ pub(crate) mod tests {
         let found = log_unrecorded(&j, &b, &|n: &str| n.ends_with(MOVE_OLD));
         assert_eq!(found, vec![legacy.clone()]);
         assert!(legacy.exists(), "logged, never deleted");
+        // Found again on the next sweep (still returned), but noted in the log only once (#428).
+        let again = log_unrecorded(&j, &b, &|n: &str| n.ends_with(MOVE_OLD));
+        assert_eq!(again, vec![legacy.clone()]);
+        assert!(!first_sighting(&legacy), "already noted this session");
         let _ = std::fs::remove_dir_all(&b);
     }
 

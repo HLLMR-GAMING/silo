@@ -33,7 +33,7 @@
 {#if catalog && (cover || summary || catalog.sources?.length)}
   <section class="sec" aria-labelledby="{uid}-about">
     <h3 id="{uid}-about" class="h">About</h3>
-    {#if cover}<img class="cover" src={cover} alt="" />{/if}
+    {#if cover}<img class="cover" src={cover} alt="" onerror={() => (cover = "")} />{/if}
     {#if summary}
       <p class="summary">{summary}</p>
       {#if hasMore}
