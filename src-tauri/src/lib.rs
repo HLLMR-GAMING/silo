@@ -932,6 +932,10 @@ fn config_write_refusal(game_running: bool) -> Result<(), String> {
     }
 }
 
+/// Removing a mod moves its file to the Recycle Bin, which fails part-way while the game holds it.
+const REMOVE_GAME_RUNNING: &str =
+    "Close Farming Simulator 25 first. Silo won't remove a mod while the game is using it.";
+
 /// "Use this version" and "Keep Silo's copy" move a mod's file in and out of the mods folder,
 /// which fails part-way while the game holds it open.
 const SWAP_GAME_RUNNING: &str =
@@ -3305,6 +3309,42 @@ async fn adopt_foreign_file(
         let layout = primary_layout(root)?;
         let conn = db::open(&db)?;
         organize::adopt_foreign(&conn, &layout, &file_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
+}
+
+/// Remove mods from the library (#429): each one's file or folder goes to the Recycle Bin / Trash,
+/// an active library mod is parked first. Refused while FS25 runs or a move is under way. The
+/// caller rescans afterward.
+#[tauri::command]
+async fn remove_from_library(
+    app: tauri::AppHandle,
+    items: Vec<organize::RemoveItem>,
+) -> Result<organize::RemoveReport, error::AppError> {
+    ensure_no_move()?;
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<organize::RemoveReport, String> {
+        if gamelaunch::fs25_running() {
+            return Err(REMOVE_GAME_RUNNING.into());
+        }
+        let _write = library_write()?;
+        let (layout, _) = active_layout()?;
+        let conn = db::open(&db)?;
+        let archive_ok = ensure_archive_available().is_ok();
+        let rep = organize::remove_from_library(&conn, &layout, &items, archive_ok, &|p| {
+            trash::delete(p).map_err(|e| e.to_string())
+        });
+        log::info!(
+            "removed {} mod(s) from the library to the Recycle Bin ({} not removed)",
+            rep.removed.len(),
+            rep.errors.len()
+        );
+        for e in &rep.errors {
+            log::warn!("not removed: {e}");
+        }
+        Ok(rep)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -8132,6 +8172,7 @@ pub fn run() {
         detect_foreign_files,
         adopt_foreign_file,
         restore_foreign_file,
+        remove_from_library,
         relink_projections,
         hardlink_support,
         app_busy,

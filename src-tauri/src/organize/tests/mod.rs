@@ -10,6 +10,7 @@ mod fsops;
 mod layout;
 mod links;
 mod relink;
+mod remove;
 mod volumes;
 
 /// Record `FS25_<tech>.zip` as organized under `category` in `root`'s manifest.

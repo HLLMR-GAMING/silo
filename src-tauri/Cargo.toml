@@ -69,6 +69,10 @@ keyring = { version = "3", features = [
     "crypto-rust",
 ] }
 
+# Remove from library (#429): the mod's file goes to the Recycle Bin / Trash, so a mistake can be
+# undone outside Silo, never deleted outright.
+trash = "5.2.9"
+
 # Process listing, to refuse moving mods while FS25 is running (see gamelaunch::fs25_running).
 sysinfo = { version = "0.36", default-features = false, features = ["system", "disk"] }
 

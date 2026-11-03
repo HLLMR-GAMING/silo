@@ -90,6 +90,14 @@ export interface ModInput {
   subcategory: string | null;
 }
 
+/** What removing mods from the library did (#429). */
+export interface RemoveReport {
+  /** Tech names whose file went to the Recycle Bin. */
+  removed: string[];
+  /** Why the others didn't, one line each ("FS25_X: …"). */
+  errors: string[];
+}
+
 export interface OrganizeReport {
   changed: number;
   skipped: number;

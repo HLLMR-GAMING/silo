@@ -85,7 +85,7 @@ describe("conflictPartners", () => {
 describe("drawerMenuItems", () => {
   it("has every per-mod action, labelled for the current state", () => {
     const off = drawerMenuItems({ favorite: false, hidden: false, broken: false });
-    expect(off.map((i) => i.id)).toEqual(["favorite", "broken", "hidden", "category", "showFile", "browse"]);
+    expect(off.map((i) => i.id)).toEqual(["favorite", "broken", "hidden", "category", "showFile", "browse", "remove"]);
     expect(off.map((i) => i.label)).toEqual([
       "Favorite",
       "Flag",
@@ -93,7 +93,10 @@ describe("drawerMenuItems", () => {
       "Change category…",
       "Show file",
       "Find in Browse",
+      "Remove from library…",
     ]);
+    // #429: a separate, dangerous item at the end.
+    expect(off.at(-1)).toMatchObject({ danger: true, separatorBefore: true });
     const on = drawerMenuItems({ favorite: true, hidden: true, broken: true });
     expect(on.slice(0, 3).map((i) => i.label)).toEqual(["Remove favorite", "Remove flag", "Unhide"]);
   });

@@ -3,7 +3,7 @@
 import type { MenuItem } from "../../ui/overlayTypes";
 import type { CurationRow } from "../../types";
 
-export type DrawerMenuId = "favorite" | "broken" | "hidden" | "category" | "showFile" | "browse";
+export type DrawerMenuId = "favorite" | "broken" | "hidden" | "category" | "showFile" | "browse" | "remove";
 
 /**
  * The menu items for one mod.
@@ -17,5 +17,7 @@ export function drawerMenuItems(c: Pick<CurationRow, "favorite" | "hidden" | "br
     { id: "category", label: "Change category…", icon: "tag", separatorBefore: true },
     { id: "showFile", label: "Show file", icon: "showFile" },
     { id: "browse", label: "Find in Browse", icon: "search" },
+    // #429: the file goes to the Recycle Bin, behind a confirmation.
+    { id: "remove", label: "Remove from library…", icon: "remove", danger: true, separatorBefore: true },
   ];
 }

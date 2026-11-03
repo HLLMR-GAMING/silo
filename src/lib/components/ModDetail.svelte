@@ -77,6 +77,8 @@
     foreign: ForeignFile | null;
     onAdoptForeign: () => void;
     onRestoreForeign: () => void;
+    /** Remove from library (#429): App confirms, then moves the file to the Recycle Bin. */
+    onRemove: () => void;
   }
   let {
     mod,
@@ -108,6 +110,7 @@
     onInstalled,
     foreign,
     onAdoptForeign,
+    onRemove,
     onRestoreForeign,
   }: Props = $props();
 
@@ -243,6 +246,8 @@
         );
       case "browse":
         return onFindInBrowse();
+      case "remove":
+        return onRemove();
     }
   }
 </script>

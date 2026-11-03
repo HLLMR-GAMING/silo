@@ -35,6 +35,7 @@ import Cloud from "@lucide/svelte/icons/cloud";
 import Copy from "@lucide/svelte/icons/copy";
 import Bug from "@lucide/svelte/icons/bug";
 import X from "@lucide/svelte/icons/x";
+import Trash2 from "@lucide/svelte/icons/trash-2";
 import ChevronDown from "@lucide/svelte/icons/chevron-down";
 import ChevronRight from "@lucide/svelte/icons/chevron-right";
 import ChevronUp from "@lucide/svelte/icons/chevron-up";
@@ -93,6 +94,7 @@ export const ICONS = {
   copy: Copy,
   bug: Bug,
   close: X,
+  remove: Trash2,
   chevronDown: ChevronDown,
   chevronRight: ChevronRight,
   chevronUp: ChevronUp,

@@ -101,6 +101,18 @@ describe("BulkBar", () => {
     expect(h.onclear).toHaveBeenCalledTimes(1);
   });
 
+  it("Remove… runs onremove (#429)", async () => {
+    const onremove = vi.fn();
+    const { user } = setup({ onremove });
+    await user.click(screen.getByRole("button", { name: "Remove…" }));
+    expect(onremove).toHaveBeenCalledTimes(1);
+  });
+
+  it("Remove… is off while another library change runs", () => {
+    setup({ onremove: vi.fn(), writeReason: "Silo is moving mods." });
+    expect(screen.getByRole("button", { name: "Remove…" })).toBeDisabled();
+  });
+
   it("Skip updates switches update checks off, and back on when every selected mod is off (#333)", async () => {
     const onskipupdates = vi.fn();
     const first = setup({ onskipupdates });

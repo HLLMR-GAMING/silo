@@ -38,6 +38,7 @@
 //! * `foldercopy`: copy-fallback folder projections: the ownership marker, `copy_state`,
 //!   `retire_folder_copy`.
 //! * `foreign`: ownership detection: `is_silo_projection` and [`detect_foreign_projections`].
+//! * `remove`: [`remove_from_library`], a mod to the Recycle Bin (parked first) and out of the library.
 //! * `tests/`: the unit tests, one file per module above (`tests/layout.rs` covers this file);
 //!   shared fixtures in `tests/mod.rs`.
 
@@ -54,6 +55,7 @@ mod foreign;
 mod fsops;
 mod links;
 mod relink;
+mod remove;
 mod volumes;
 
 pub use adopt::*;
@@ -63,6 +65,7 @@ pub use foreign::*;
 pub(crate) use fsops::*;
 pub(crate) use links::*;
 pub use relink::*;
+pub use remove::*;
 pub use volumes::*;
 
 const ARCHIVE: &str = "archive";

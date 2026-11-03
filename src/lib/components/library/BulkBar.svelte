@@ -35,6 +35,8 @@
     onskipupdates?: (on: boolean) => void;
     /** Add the selected mods to, or remove them from, saved sets (the "Mod sets…" dialog). */
     onmodsets: () => void;
+    /** Remove the selected mods from the library (#429): App confirms first. */
+    onremove?: () => void;
     onselectall: () => void;
     onclear: () => void;
     /** The bar's element (bindable). */
@@ -56,6 +58,7 @@
     onskipupdates,
     allSkipUpdates = false,
     onmodsets,
+    onremove,
     onselectall,
     onclear,
     ref = $bindable(null),
@@ -130,6 +133,11 @@
     </Button>
   {/if}
   <Button size="sm" icon="modSets" onclick={onmodsets}>Mod sets…</Button>
+  {#if onremove}
+    <span use:tooltip={writeReason || null}>
+      <Button size="sm" icon="remove" disabled={!!writeReason} onclick={onremove}>Remove…</Button>
+    </span>
+  {/if}
   <span class="sep" aria-hidden="true">·</span>
   <Button size="sm" variant="ghost" disabled={allShownSelected} onclick={onselectall}>
     Select all {shownCount} shown

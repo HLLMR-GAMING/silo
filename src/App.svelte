@@ -32,6 +32,8 @@
     planOrganize,
     applyOrganize,
     setActive,
+    removeFromLibrary,
+    safeFirstDialog,
     flatten,
     clearScanCache,
     getSavegames,
@@ -100,6 +102,7 @@
   } from "./lib/configSchemas";
   import type {
     ModEntry,
+    RemoveReport,
     ScanResult,
     CurationRow,
     ModInput,
@@ -150,7 +153,8 @@
     type OpToken,
   } from "./lib/state/ops.svelte";
   import { createScanSettler, focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
-  import { describeError, formatDetail, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
+  import { describeError, formatDetail, isWindowsPlatform, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
+  import { removeConfirmText, removedText, removeVerb } from "./lib/removeMods";
   import {
     info,
     inlineError,
@@ -2705,6 +2709,52 @@
   }
 
   /**
+   * Remove from library (#429): a confirmation that names the mods and says their files go to the
+   * Recycle Bin (Cancel first, and focused), then the backend moves each file or folder there,
+   * parking an active library mod first. The folder is read again afterwards.
+   * @param list the mods to remove (the drawer's mod, or the selection)
+   */
+  async function removeMods(list: ModEntry[]) {
+    if (list.length === 0) return;
+    const busy = writeRefusal();
+    if (busy) {
+      refuse(busy);
+      return;
+    }
+    const windows = isWindowsPlatform();
+    const removing = list.map((m) => ({
+      techName: m.techName,
+      title: m.title,
+      fileName: fileName(m.path),
+      kind: m.kind,
+      on: isOn(m),
+    }));
+    if (!(await safeFirstDialog(removeConfirmText(removing, windows), { safe: "Cancel", verb: removeVerb(windows) })))
+      return;
+    const op = beginWrite(list.length === 1 ? "Removing a mod" : `Removing ${modsCount(list.length)}`);
+    if (!op) return;
+    let rep: RemoveReport | null = null;
+    try {
+      rep = await removeFromLibrary(list.map((m) => ({ techName: m.techName, path: m.path })));
+    } catch (e) {
+      reportError(e, "Removing mods from the library");
+    } finally {
+      op.end();
+    }
+    if (!rep) return;
+    const gone = new Set(rep.removed);
+    if (detailMod && gone.has(detailMod.techName) && list.some((m) => m.path === detailMod?.path)) detailMod = null;
+    if (gone.size > 0) selection.clear();
+    await runScan(false);
+    const done = removedText(rep.removed, removing, windows);
+    if (done) success(done);
+    if (rep.errors.length > 0) {
+      const more = rep.errors.length > 3 ? ` (and ${rep.errors.length - 3} more)` : "";
+      reportError(rep.errors.slice(0, 3).join("; ") + more, "Removing mods from the library");
+    }
+  }
+
+  /**
    * BulkBar Turn on / Park (the sequence and its dialogs are in library/bulkSwitch.ts): loose mods
    * being parked are filed into the library first, always after a dialog that says so; the rest
    * switch through the projection; then the switch toast offers Undo.
@@ -4200,6 +4250,7 @@
         }}
         source={sourceMap[dm.techName] ?? null}
         onSourceChange={(row) => setSource(dm.techName, row)}
+        onRemove={() => removeMods([dm])}
         onInstalled={() => {
           detailMod = null;
           runScan(false);
@@ -4322,6 +4373,7 @@
               onhide={(on) => setCurationFor(selectedMods, "hidden", on)}
               onskipupdates={(on) => setCurationFor(selectedMods, "skipUpdates", on)}
               onmodsets={() => openMembership(selectedMods, true)}
+              onremove={() => removeMods(selectedMods)}
               onselectall={() => selection.selectAll(visibleKeys)}
               onclear={() => selection.clear()}
             />
