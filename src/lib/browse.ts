@@ -29,12 +29,6 @@ export function loadCatalogImage(url: string): Promise<string> {
   return p;
 }
 
-/** Whether an image's error event is for the picture shown now (`current`), not a late one from
- *  an element showing an earlier mod's picture: only then should it be dropped (#428). */
-export function failedIsCurrent(e: Event, current: string): boolean {
-  return (e.currentTarget as HTMLImageElement | null)?.getAttribute("src") === current;
-}
-
 export const SOURCE_LABEL: Record<string, string> = {
   github: "GitHub",
   modhub: "ModHub",

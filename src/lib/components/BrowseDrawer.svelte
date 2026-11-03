@@ -12,7 +12,6 @@
     parseRepo,
     canExpand,
     loadCatalogImage,
-    failedIsCurrent,
     browseBadges,
     progressPct,
     type InstallProgressEntry,
@@ -87,6 +86,8 @@
 
   // Cover loads through the Rust proxy (data: URL) — the CDN needs a referer.
   let cover = $state("");
+  /** The cover element shown now: an error from an earlier one (a previous mod's) is ignored. */
+  let coverEl = $state<HTMLImageElement | null>(null);
   $effect(() => {
     const url = detail?.imageUrl;
     cover = "";
@@ -123,7 +124,7 @@
     </div>
     <div class="drawer-body">
       {#if cover}
-        <img class="drawer-img" src={cover} alt="" onerror={(e) => failedIsCurrent(e, cover) && (cover = "")} />
+        <img class="drawer-img" src={cover} alt="" bind:this={coverEl} onerror={(e) => e.currentTarget === coverEl && (cover = "")} />
       {/if}
       <dl class="facts">
         {#if d.category}<dt>Category</dt><dd>{d.category}</dd>{/if}
