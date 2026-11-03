@@ -54,7 +54,7 @@ export function removeConfirmText(mods: RemovingMod[], windows: boolean): string
  * and where, each copy that goes and where, that they go to the bin, and what's on afterwards.
  * @param keep the kept copy: its name, where it is (`place`), whether it's in the mods folder
  *   (`loose`), and whether the game loads it now (`on`: the plan's answer, from the files; null
- *   when it couldn't be told)
+ *   when it couldn't be told). Removing the others never touches it, so loaded it stays loaded.
  * @param removing the copies that go, each with where it is and whether the plan parks it or it's
  *   loaded from the mods folder (`on`: the plan's own answer)
  */
@@ -66,14 +66,15 @@ export function keepConfirmText(
   const bin = binName(windows);
   const gone = removing.map((m) => `${m.fileName} (${m.place})`).join(", ");
   const one = removing.length === 1;
-  // A library copy kept while a copy that's on goes: that one is parked (or binned from the mods
-  // folder), and nothing turns the kept one on, so the mod ends up off whatever the rows showed.
+  // The kept copy is never touched, so one the game loads now stays loaded. Otherwise a copy that's
+  // on going (parked, or binned from the mods folder) leaves the mod off: nothing turns the kept
+  // one on.
   const after = keep.loose
     ? " The copy you keep stays in your mods folder, so the game loads it."
-    : removing.some((m) => m.on)
-      ? " Afterwards the mod is off: turn on the copy you kept to use it."
-      : keep.on === true
-        ? " The copy you keep stays on."
+    : keep.on === true
+      ? " The copy you keep stays on."
+      : removing.some((m) => m.on)
+        ? " Afterwards the mod is off: turn on the copy you kept to use it."
         : keep.on === false
           ? " The copy you keep stays parked."
           : " Afterwards, check in the Library whether the mod is on.";

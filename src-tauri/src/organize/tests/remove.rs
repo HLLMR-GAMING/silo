@@ -1192,3 +1192,35 @@ fn a_loose_copy_sharing_the_parked_names_isnt_taken_for_the_parked_one() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn keeping_the_loaded_library_copy_while_a_loaded_folder_goes_keeps_it_on() {
+    // The recorded copy is linked in, and an unzipped folder of it sits in the mods folder too.
+    // Keeping the recorded copy removes the folder; the recorded copy's link stays (still on).
+    let (base, conn, layout, recorded) = library_with_foo("rm_keep_loaded_lib", true);
+    let folder = layout.mods.join("FS25_Foo");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+    let link = layout.mods.join("FS25_Foo.zip");
+    let before = crate::scratch::entry_number(&link);
+    let k = keeper(&layout, &req("FS25_Foo", &recorded)).unwrap();
+    let (plan, found) =
+        plan_removal_keeping(&conn, &layout, &[req("FS25_Foo", &folder)], Some(&k), true);
+    assert_eq!(found.len(), 1, "{:?}", plan.refused);
+    assert_eq!(plan.keep_on, Some(true));
+    assert!(plan.items[0].on, "the folder is loaded too");
+    let bin = base.join("bin");
+    let rep = carry_out(&conn, &layout, &found, Some(&k), true, &bin_at(&bin));
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert!(!folder.exists());
+    assert!(
+        recorded.is_file() && link.exists(),
+        "the kept copy and its link stay"
+    );
+    assert_eq!(crate::scratch::entry_number(&link), before);
+    assert!(
+        db::load_organized(&conn, &key_of(&layout))[0].active,
+        "still on"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
