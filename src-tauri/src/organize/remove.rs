@@ -39,6 +39,9 @@ pub struct Planned {
 pub struct RemovalPlan {
     pub items: Vec<Planned>,
     pub refused: Vec<String>,
+    /// Keeping one copy (#423): whether the game loads the kept copy now (it's in the mods
+    /// folder, or it's the copy Silo's link at its name points to). None: it couldn't be told.
+    pub keep_on: Option<bool>,
 }
 
 /// What was true of a planned mod's entry when the user confirmed, compared again before anything
@@ -144,6 +147,23 @@ pub fn keeper(layout: &Layout, keep: &RemoveRequest) -> Result<Keeper, String> {
     })
 }
 
+/// Whether the game loads the kept copy now: one in the mods folder does; a library copy does when
+/// it's what Silo's link (or copy) at its name in the mods folder is. None when that slot can't be
+/// checked. Told from the files, not from what the Library rows show (two library copies of one
+/// mod can both show as on).
+pub fn keeper_loaded(layout: &Layout, k: &Keeper) -> Option<bool> {
+    if k.path.parent() == Some(layout.mods.as_path()) {
+        return Some(true);
+    }
+    let name = k.path.file_name()?;
+    let slot = layout.mods.join(name);
+    match slot.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+        Ok(_) => projection_verdict(&slot, &k.path, k.evidence.kind).ok(),
+    }
+}
+
 /// The kept copy is still what it was when the user confirmed.
 fn keeper_unchanged(k: &Keeper) -> bool {
     let refs: Vec<&Path> = k.roots.iter().map(PathBuf::as_path).collect();
@@ -216,6 +236,7 @@ pub fn plan_removal_keeping(
             Err(why) => plan.refused.push(format!("{}: {why}", r.tech_name)),
         }
     }
+    plan.keep_on = keep.and_then(|k| keeper_loaded(layout, k));
     (plan, found)
 }
 

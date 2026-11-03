@@ -870,3 +870,44 @@ fn a_kept_copy_that_changes_partway_stops_the_rest_and_reports_what_went() {
     assert!(second.is_file(), "the second copy stays");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Two library copies of FS25_Foo: the recorded one (Vehicles) linked into the mods folder, and an
+/// unrecorded second copy (Tools). Both can show as on in the Library.
+fn foo_two_library_copies(tag: &str) -> (PathBuf, Connection, Layout, PathBuf, PathBuf) {
+    let (base, conn, layout, recorded) = library_with_foo(tag, true);
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let second = tools.join("FS25_Foo.zip");
+    std::fs::write(&second, b"PK the second library copy").unwrap();
+    (base, conn, layout, recorded, second)
+}
+
+#[test]
+fn the_plan_tells_whether_the_kept_copy_is_loaded_in_both_directions() {
+    // Keep the linked recorded copy, remove the second: it's loaded, and removing the second parks
+    // nothing, so the mod stays on.
+    let (base, conn, layout, recorded, second) = foo_two_library_copies("rm_keep_linked");
+    let k = keeper(&layout, &req("FS25_Foo", &recorded)).unwrap();
+    let (plan, found) =
+        plan_removal_keeping(&conn, &layout, &[req("FS25_Foo", &second)], Some(&k), true);
+    assert_eq!(found.len(), 1, "{:?}", plan.refused);
+    assert_eq!(plan.keep_on, Some(true));
+    assert!(!plan.items[0].on, "nothing to park");
+    let _ = std::fs::remove_dir_all(&base);
+
+    // Keep the second, remove the linked recorded copy: the kept one isn't loaded, and removing
+    // the recorded one parks it, so the mod ends up off.
+    let (base, conn, layout, recorded, second) = foo_two_library_copies("rm_keep_unlinked");
+    let k = keeper(&layout, &req("FS25_Foo", &second)).unwrap();
+    let (plan, found) = plan_removal_keeping(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &recorded)],
+        Some(&k),
+        true,
+    );
+    assert_eq!(found.len(), 1, "{:?}", plan.refused);
+    assert_eq!(plan.keep_on, Some(false));
+    assert!(plan.items[0].on, "it's parked first");
+    let _ = std::fs::remove_dir_all(&base);
+}

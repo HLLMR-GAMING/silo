@@ -119,6 +119,13 @@ describe("keepConfirmText (#423)", () => {
     expect(text).not.toContain("stays on");
   });
 
+  it("says nothing it can't know when the kept copy's state couldn't be told", () => {
+    const keep = { fileName: "FS25_Foo.zip", place: "in your library, Vehicles", loose: false, on: null };
+    const text = keepConfirmText(keep, [{ fileName: "FS25_Foo.zip", place: "in your library, Tools", on: false }], true);
+    expect(text).toContain("Afterwards, check in the Library whether the mod is on.");
+    expect(text).not.toMatch(/stays (on|parked)/);
+  });
+
   it("names every copy that goes, and the kept one's state", () => {
     const two = [
       { fileName: "FS25_Foo.zip", place: "in your library, Tools", on: false },

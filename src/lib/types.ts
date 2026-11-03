@@ -106,6 +106,9 @@ export interface PlannedRemoval {
 export interface RemovalPlan {
   items: PlannedRemoval[];
   refused: string[];
+  /** Keeping one copy (#423): whether the game loads the kept copy now, from the files; null
+   *  when it couldn't be told or nothing is kept. */
+  keepOn: boolean | null;
 }
 
 /** What removing mods from the library did (#429). */
