@@ -2736,13 +2736,9 @@
     if (!op) return;
     let rep: RemoveReport | null = null;
     try {
-      // A zip goes with the size and time shown in the confirmation: changed since, it's refused.
+      // Each goes with what the confirmation showed: changed since, it's refused.
       rep = await removeFromLibrary(
-        list.map((m) =>
-          m.kind === "zip"
-            ? { techName: m.techName, path: m.path, size: m.size, mtimeMs: m.mtimeMs }
-            : { techName: m.techName, path: m.path },
-        ),
+        list.map((m) => ({ techName: m.techName, path: m.path, kind: m.kind, size: m.size, mtimeMs: m.mtimeMs })),
       );
     } catch (e) {
       reportError(e, "Removing mods from the library");

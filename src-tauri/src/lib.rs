@@ -933,8 +933,7 @@ fn config_write_refusal(game_running: bool) -> Result<(), String> {
 }
 
 /// Removing a mod moves its file to the Recycle Bin, which fails part-way while the game holds it.
-const REMOVE_GAME_RUNNING: &str =
-    "Close Farming Simulator 25 first. Silo won't remove a mod while the game is using it.";
+const REMOVE_GAME_RUNNING: &str = "Close Farming Simulator 25 first. Silo won't remove a mod while      the game is starting or using it. If it didn't start, try again in half a minute.";
 
 /// "Use this version" and "Keep Silo's copy" move a mod's file in and out of the mods folder,
 /// which fails part-way while the game holds it open.
@@ -3315,37 +3314,104 @@ async fn adopt_foreign_file(
     .map_err(error::AppError::from)
 }
 
-/// Move `p` to the Recycle Bin / Trash (#429). On Windows, only on a fixed drive: a removable,
-/// network or optical drive has no Recycle Bin, and Windows would delete the file outright, so
-/// that's refused. (Where recycling still isn't possible on a fixed drive, the Recycle Bin turned
-/// off or too small, Windows itself asks before deleting permanently, and saying no keeps it.)
+/// Move `p` to the Recycle Bin / Trash (#429), and only there.
+/// - Windows: only on a fixed drive (removable, network and optical drives have no Recycle Bin,
+///   and Windows would delete outright), and the Recycle Bin of that drive must hold one more item
+///   afterwards. Where a fixed drive still can't recycle (the bin turned off or too small), Windows
+///   asks before deleting permanently: "No" keeps the file and fails the move, "Yes" is then
+///   reported as deleted, not as moved to the bin.
+/// - Linux: a folder on another drive than the Trash is refused, since moving it there means
+///   copying and then deleting it, which can stop halfway.
+/// - macOS: the system moves it to the Trash of its volume.
+#[cfg(windows)]
 fn move_to_bin(p: &std::path::Path) -> Result<(), String> {
-    #[cfg(windows)]
-    if !on_fixed_drive(p) {
+    if !bin::on_fixed_drive(p) {
         return Err("this drive has no Recycle Bin, so Silo won't remove it. Delete it yourself if you want it gone".into());
+    }
+    let before = bin::recycle_bin_items(p)
+        .ok_or("Silo couldn't check the Recycle Bin, so it didn't remove it")?;
+    trash::delete(p).map_err(|e| e.to_string())?;
+    if bin::recycle_bin_items(p).is_some_and(|after| after > before) {
+        Ok(())
+    } else {
+        Err("Windows deleted it permanently instead of moving it to the Recycle Bin (it asked first). It can't be restored from there".into())
+    }
+}
+
+#[cfg(not(windows))]
+fn move_to_bin(p: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if p.is_dir() && !bin::same_drive_as_trash(p) {
+        return Err("this folder is on another drive than your Trash, so Silo won't move it there. Delete it yourself if you want it gone".into());
     }
     trash::delete(p).map_err(|e| e.to_string())
 }
 
-/// Whether `p` is on a fixed drive (one with a Recycle Bin). False when it can't be told.
-#[cfg(windows)]
-fn on_fixed_drive(p: &std::path::Path) -> bool {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
-    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut root = vec![0u16; 1024];
-    // SAFETY: both buffers are valid for the call; `wide` is NUL-terminated and `root` holds
-    // `root.len()` units.
-    let ok = unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) };
-    if ok == 0 {
-        return false;
+/// What `move_to_bin` checks about the platform's bin.
+mod bin {
+    /// Whether `p` is on a fixed drive (one with a Recycle Bin). False when it can't be told.
+    #[cfg(windows)]
+    pub(super) fn on_fixed_drive(p: &std::path::Path) -> bool {
+        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+        const DRIVE_FIXED: u32 = 3; // windows-sys WindowsProgramming::DRIVE_FIXED
+        let Some(root) = volume_root(p) else {
+            return false;
+        };
+        // SAFETY: `root` is a NUL-terminated volume path.
+        unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
     }
-    let end = root.iter().position(|&c| c == 0).unwrap_or(root.len());
-    let root = std::ffi::OsString::from_wide(&root[..end]);
-    let root: Vec<u16> = root.encode_wide().chain(Some(0)).collect();
-    // SAFETY: `root` is a NUL-terminated volume path.
-    const DRIVE_FIXED: u32 = 3; // windows-sys WindowsProgramming::DRIVE_FIXED
-    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
+
+    /// How many items the Recycle Bin of `p`'s drive holds, or None when it can't be read.
+    #[cfg(windows)]
+    pub(super) fn recycle_bin_items(p: &std::path::Path) -> Option<i64> {
+        use windows_sys::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+        let root = volume_root(p)?;
+        let mut info = SHQUERYRBINFO {
+            cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+            i64Size: 0,
+            i64NumItems: 0,
+        };
+        // SAFETY: `root` is NUL-terminated and `info` is a sized struct the call fills.
+        let hr = unsafe { SHQueryRecycleBinW(root.as_ptr(), &mut info) };
+        (hr >= 0).then_some(info.i64NumItems)
+    }
+
+    /// The NUL-terminated root of the volume `p` is on (a drive letter's root, or a mount folder).
+    #[cfg(windows)]
+    fn volume_root(p: &std::path::Path) -> Option<Vec<u16>> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut root = vec![0u16; 1024];
+        // SAFETY: both buffers are valid for the call; `wide` is NUL-terminated and `root` holds
+        // `root.len()` units.
+        let ok = unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) };
+        if ok == 0 {
+            return None;
+        }
+        let end = root.iter().position(|&c| c == 0)?;
+        root.truncate(end + 1);
+        Some(root)
+    }
+
+    /// Whether `p` is on the same drive as the user's Trash (`$XDG_DATA_HOME/Trash`, or the
+    /// nearest folder of it that exists). False when it can't be told.
+    #[cfg(target_os = "linux")]
+    pub(super) fn same_drive_as_trash(p: &std::path::Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let Some(mut trash) = dirs::data_dir().map(|d| d.join("Trash")) else {
+            return false;
+        };
+        let trash_dev = loop {
+            if let Ok(m) = std::fs::metadata(&trash) {
+                break m.dev();
+            }
+            if !trash.pop() {
+                return false;
+            }
+        };
+        std::fs::symlink_metadata(p).is_ok_and(|m| m.dev() == trash_dev)
+    }
 }
 
 /// Remove mods from the library (#429): each one's file or folder goes to the Recycle Bin / Trash,
@@ -3360,11 +3426,9 @@ async fn remove_from_library(
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::RemoveReport, String> {
         let _write = library_write()?;
-        // Checked once the write is ours: waiting for it can take a while, and the game may
-        // have started meanwhile.
-        if gamelaunch::fs25_running() || gamelaunch::profile_launch_pending() {
-            return Err(REMOVE_GAME_RUNNING.into());
-        }
+        // Admitted once the write is ours (waiting for it can take a while, and the game may
+        // have started meanwhile); Play waits until it's done.
+        let _admitted = admit_removal()?;
         let (layout, _) = active_layout()?;
         let conn = db::open(&db)?;
         let archive_ok = ensure_archive_available().is_ok();
@@ -6058,6 +6122,34 @@ fn admit_move() -> Result<(), String> {
     Ok(())
 }
 
+/// Raised (under the launch gate) while a removal (#429) is changing files: Play waits for it.
+static REMOVE_ADMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lowers `REMOVE_ADMITTED` when the removal is done, however it ends.
+struct RemoveAdmission;
+
+impl Drop for RemoveAdmission {
+    fn drop(&mut self) {
+        REMOVE_ADMITTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Admit a removal (#429), as `admit_move` admits a move: refused while the game runs, or a Play
+/// is in flight or started it moments ago (it may not show up as running yet). The caller holds
+/// the library write lock.
+fn admit_removal() -> Result<RemoveAdmission, String> {
+    // The process list first: reading it takes a moment, and Play shouldn't wait on it.
+    if gamelaunch::fs25_running() || gamelaunch::profile_launch_pending() {
+        return Err(REMOVE_GAME_RUNNING.into());
+    }
+    let gate = launch_gate();
+    if gate.launching(launch_clock()) {
+        return Err(REMOVE_GAME_RUNNING.into());
+    }
+    REMOVE_ADMITTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(RemoveAdmission)
+}
+
 /// A Play admitted through the launch gate; `started` records that the start went out. Dropped
 /// without it (a refusal, an error, a panic), the Play is simply done.
 struct LaunchTicket {
@@ -6067,8 +6159,17 @@ struct LaunchTicket {
 impl LaunchTicket {
     /// Admit a Play, or refuse it (`MOVE_RUNNING`) while a move is admitted.
     fn take() -> Result<LaunchTicket, error::AppError> {
-        if launch_gate().begin_launch(move_in_progress()) {
+        // Both read under the gate's lock (the receiver is taken first), as they're raised.
+        if launch_gate().begin_launch(
+            move_in_progress() || REMOVE_ADMITTED.load(std::sync::atomic::Ordering::SeqCst),
+        ) {
             return Ok(LaunchTicket { started: false });
+        }
+        if !move_in_progress() {
+            return Err(error::AppError::new(
+                error::code::LIBRARY_BUSY,
+                "Silo is removing mods. Play again in a moment.",
+            ));
         }
         Err(move_play_gate(true, Ok(Vec::new()), true).expect_err("refused while a move is"))
     }

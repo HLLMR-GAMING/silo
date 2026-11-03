@@ -1600,6 +1600,13 @@ pub fn reconcile_organized(
     for existing in load_organized(&tx, root) {
         if !keep.contains(existing.tech_name.as_str()) {
             delete_organized(&tx, root, &existing.tech_name)?;
+            // Its projection record goes too: left behind, it could vouch for whatever is put
+            // at that name later (#429).
+            tx.execute(
+                "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
+                rusqlite::params![root, existing.file_name],
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     for row in desired {
