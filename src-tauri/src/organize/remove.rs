@@ -375,17 +375,22 @@ pub fn carry_out(
         .filter(|(p, _, row, _)| p.on && row.is_some())
         .map(|(p, _, _, _)| p.tech_name.as_str())
         .collect();
+    // Park exactly those, one by one, each checked at that moment: never a pass over the whole
+    // library, which would reconcile other names too (#423: another copy's entry among them).
     let mut park_errors: Vec<String> = Vec::new();
-    if !leaving.is_empty() {
-        let keep: HashSet<String> = rows
-            .iter()
-            .filter(|r| r.active && !leaving.contains(r.tech_name.as_str()))
-            .map(|r| r.tech_name.clone())
-            .collect();
-        let parked = set_active(conn, layout, &keep);
-        park_errors = parked.errors;
-        // Where parking kept an edited folder copy: the user needs to know before its original goes.
-        rep.notices.extend(parked.notices);
+    for (_, _, row, _) in ready
+        .iter()
+        .filter(|(p, _, _, _)| leaving.contains(p.tech_name.as_str()))
+    {
+        let Some(row) = row else { continue };
+        match park_one(conn, layout, &key, &rows, row) {
+            // Where parking kept an edited folder copy: the user needs to know before its original goes.
+            Ok(Some(kept)) => rep
+                .notices
+                .push(kept_copy_notice(&row.file_name, &kept, false)),
+            Ok(None) => {}
+            Err(e) => park_errors.push(format!("{}: {e}", row.tech_name)),
+        }
     }
 
     for (p, confirmed, row, path) in ready {
@@ -694,6 +699,28 @@ fn check_loose(
         },
         evidence,
     ))
+}
+
+/// Park library mod `row` alone: take away the entry at its name only while it still serves the
+/// recorded copy (identity first, see [`slot_serves`]); one that serves anything else is left as
+/// it is. Its flag and projection record follow. Returns where an edited folder copy was kept.
+fn park_one(
+    conn: &Connection,
+    layout: &Layout,
+    key: &str,
+    rows: &[OrganizedRow],
+    row: &OrganizedRow,
+) -> Result<Option<PathBuf>, String> {
+    let src = archive_path(&layout.archive, &row.category, &row.file_name);
+    let link = layout.mods.join(&row.file_name);
+    let kept = if slot_serves(layout, rows, &row.file_name, &src, &row.kind)? {
+        clear_projection(&link, &src, &layout.mods).map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+    db::forget_projection(conn, key, &row.file_name);
+    db::set_organized_active(conn, key, &row.tech_name, false)?;
+    Ok(kept)
 }
 
 /// After parking: nothing of Silo's is left at library mod `row`'s name. Parking reported no

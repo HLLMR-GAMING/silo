@@ -1108,3 +1108,47 @@ fn an_entry_switched_to_the_second_while_confirming_stops_removing_the_recorded_
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn parking_for_a_batch_touches_only_the_mods_being_removed() {
+    // Recorded A is flagged parked while an independent byte-identical second copy owns the
+    // loaded entry; another mod X is on. Removing A and X parks only X: the second's entry stays.
+    // X is turned on first, while FS25_Foo's name is still empty; then the second copy and its
+    // entry appear (a whole-library pass now would take that entry: the point of the test).
+    let (base, conn, layout, recorded) = library_with_foo("rm_batch_scope", false);
+    let x = layout.archive.join("Vehicles/FS25_X.zip");
+    std::fs::write(&x, b"PK X").unwrap();
+    organize_row(&conn, &layout.mods, "FS25_X", "Vehicles", false);
+    let on: HashSet<String> = ["FS25_X".to_string()].into_iter().collect();
+    assert!(set_active(&conn, &layout, &on).errors.is_empty());
+    let x_link = layout.mods.join("FS25_X.zip");
+    assert!(x_link.exists());
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let second = tools.join("FS25_Foo.zip");
+    std::fs::copy(&recorded, &second).unwrap();
+    let slot = layout.mods.join("FS25_Foo.zip");
+    std::fs::hard_link(&second, &slot).unwrap();
+    let before = crate::scratch::entry_number(&slot);
+    let k = keeper(&layout, &req("FS25_Foo", &second)).unwrap();
+    let (plan, found) = plan_removal_keeping(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &recorded), req("FS25_X", &x)],
+        Some(&k),
+        true,
+    );
+    assert_eq!(found.len(), 2, "{:?}", plan.refused);
+    let bin = base.join("bin");
+    let rep = carry_out(&conn, &layout, &found, Some(&k), true, &bin_at(&bin));
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert!(!x_link.exists(), "X was parked");
+    assert!(slot.is_file(), "the second copy's entry stays");
+    assert_eq!(
+        crate::scratch::entry_number(&slot),
+        before,
+        "the very same file"
+    );
+    assert!(second.is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
