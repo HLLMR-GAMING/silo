@@ -821,3 +821,52 @@ fn the_recorded_copy_under_another_spelling_is_not_a_second_copy() {
     assert!(src.is_file());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn a_kept_copy_that_changes_partway_stops_the_rest_and_reports_what_went() {
+    // Three copies: keep the folder, remove two library copies. The kept copy changes while the
+    // first one moves: the first is gone (and reported so), the second stays.
+    let (base, conn, layout, src, folder) = foo_twice("rm_keep_partway");
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let second = tools.join("FS25_Foo.zip");
+    std::fs::write(&second, b"PK a second library copy").unwrap();
+    let k = keeper(&layout, &req("FS25_Foo", &folder)).unwrap();
+    let (plan, found) = plan_removal_keeping(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &src), req("FS25_Foo", &second)],
+        Some(&k),
+        true,
+    );
+    assert_eq!(found.len(), 2, "{:?}", plan.refused);
+    let bin = base.join("bin");
+    let moves = std::cell::Cell::new(0);
+    let changing_bin = |p: &Path| {
+        moves.set(moves.get() + 1);
+        std::fs::write(folder.join("readme.txt"), b"edited while removing").unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::rename(
+            p,
+            bin.join(format!(
+                "{}-{}",
+                moves.get(),
+                p.file_name().unwrap().to_string_lossy()
+            )),
+        )
+        .unwrap();
+        Binned::Recycled
+    };
+    let rep = carry_out(&conn, &layout, &found, Some(&k), true, &changing_bin);
+    assert_eq!(moves.get(), 1, "only the first moved");
+    assert_eq!(rep.removed.len(), 1);
+    assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
+    assert!(
+        rep.errors[0].contains("changed partway through"),
+        "{:?}",
+        rep.errors
+    );
+    assert!(!rep.errors[0].contains("removed nothing"));
+    assert!(second.is_file(), "the second copy stays");
+    let _ = std::fs::remove_dir_all(&base);
+}

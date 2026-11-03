@@ -157,7 +157,7 @@
   import { createScanSettler, focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
   import { describeError, formatDetail, isWindowsPlatform, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import { keepConfirmText, removeConfirmText, removedText, removeVerb } from "./lib/removeMods";
-  import { copyPlace, duplicateCopies } from "./lib/duplicates";
+  import { copyPlace, duplicateCopies, loadedCopy } from "./lib/duplicates";
   import {
     info,
     inlineError,
@@ -2772,10 +2772,17 @@
     const byPath = new Map(list.map((m) => [m.path, m]));
     const text = keep
       ? keepConfirmText(
-          { fileName: fileName(keep.path), place: copyPlace(keep), loose: !keep.organized, on: isOn(keep) },
+          {
+            fileName: fileName(keep.path),
+            place: copyPlace(keep),
+            loose: !keep.organized,
+            // The one copy the game loads now, if that can be told (two library rows can both show on).
+            on: loadedCopy([keep, ...list], isOn) === keep,
+          },
+          // `on` from the plan: what carrying it out parks (or bins from the mods folder).
           plan.items.map((p) => {
             const m = byPath.get(p.path);
-            return { fileName: p.fileName, place: m ? copyPlace(m) : "", on: p.on && !!m && isOn(m) };
+            return { fileName: p.fileName, place: m ? copyPlace(m) : "", on: p.on };
           }),
           windows,
         )

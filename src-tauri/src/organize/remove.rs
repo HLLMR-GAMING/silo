@@ -250,14 +250,12 @@ pub fn carry_out(
     };
 
     // The copy the user keeps must still be the one they confirmed, or nothing goes (#423).
-    let keeper_changed = || {
-        "the copy you're keeping changed since you confirmed, so Silo removed nothing. Try again."
-            .to_string()
-    };
     if keep.is_some_and(|k| !keeper_unchanged(k)) {
         for (p, _) in planned {
-            rep.errors
-                .push(format!("{}: {}", p.tech_name, keeper_changed()));
+            rep.errors.push(format!(
+                "{}: the copy you're keeping changed since you confirmed, so Silo removed nothing. Try again.",
+                p.tech_name
+            ));
         }
         return rep;
     }
@@ -324,7 +322,10 @@ pub fn carry_out(
             continue;
         }
         if keep.is_some_and(|k| !keeper_unchanged(k)) {
-            rep.errors.push(format!("{name}: {}", keeper_changed()));
+            // Partway through: what's already gone stays gone (it's in `removed`); the rest stays.
+            rep.errors.push(format!(
+                "{name}: the copy you're keeping changed partway through, so Silo stopped and left this one. Try again."
+            ));
             continue;
         }
         let gone = match bin(&path) {

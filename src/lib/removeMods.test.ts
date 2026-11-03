@@ -112,6 +112,13 @@ describe("keepConfirmText (#423)", () => {
     expect(text).toContain("goes to the Trash");
   });
 
+  it("keeping one library copy while the one Silo links goes says off, even if both looked on", () => {
+    const keep = { fileName: "FS25_Foo.zip", place: "in your library, Tools", loose: false, on: true };
+    const text = keepConfirmText(keep, [{ fileName: "FS25_Foo.zip", place: "in your library, Vehicles", on: true }], true);
+    expect(text).toContain("Afterwards the mod is off");
+    expect(text).not.toContain("stays on");
+  });
+
   it("names every copy that goes, and the kept one's state", () => {
     const two = [
       { fileName: "FS25_Foo.zip", place: "in your library, Tools", on: false },
