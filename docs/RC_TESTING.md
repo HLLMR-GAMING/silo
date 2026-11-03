@@ -147,31 +147,30 @@ archive validity — so confirm that path degrades to the validity check, not a 
 1. Organize a mod → deactivate it (parked).
 2. Drop a **different** ZIP at the same filename in the flat `mods/` folder.
 3. Activate → park → Undo organizing → Re-read every mod → switch mod sets.
-4. **Silo must refuse to delete the user replacement**, and say why it left the file (the
-   wording depends on the step, e.g. "isn't the one Silo linked" when parking, "isn't Silo's copy
-   of this mod" when turning on).
+4. **Silo must not lose the user replacement**, and when it leaves a file alone it says so.
 
-Repeat across every identity branch the code checks:
-- Same size, different bytes · same size **and** modified time, different bytes · exact
-  byte-identical copy · hardlink · symlink/junction · folder mod · copied directory **with** and
-  **without** the `.silo-projection` marker, unchanged and with a file edited · a link left
-  dangling (its target gone).
+Repeat across these identity branches:
+- Same size, different bytes · different bytes placed while the mod is active, keeping the
+  projection's size **and** modified time · exact byte-identical copy · hardlink ·
+  symlink/junction · folder mod · copied directory **with** and **without** the
+  `.silo-projection` marker, unchanged and with a file edited · a link left dangling (its target
+  gone) · the archived copy missing, replaced by a link, or changed.
 
-Forensic-diff after each, against the Phase 0 baseline. Expected:
+Forensic-diff after each step, against the Phase 0 baseline. **The rule is about content, not
+names: no bytes may disappear unless the same bytes still exist elsewhere, unchanged.**
 - **Anything Silo can't prove is its own** (different bytes, a folder without the marker, a link
-  that resolves somewhere else that exists) survives every step, byte for byte.
-- **Copies Silo treats as its own projection** (a byte-identical copy, a hardlink of the archived
-  file, a link that resolves to it, an unchanged marked folder copy) may be removed by parking.
-  That is by design: copy-mode projections (another drive, exFAT, cloud-synced folders) are
-  exactly such copies. It's a pass only if parking's own checks on the archived copy passed
-  (#399): afterwards the archived copy is still there, a real file or folder (not a link), and
-  unchanged from the baseline. If the archived copy was missing, a link, or different, the
-  mods-folder copy must still be there and Silo must say why it kept it.
-- **A marked folder copy with an edited file** is never deleted: parking moves it to
-  `mods/backups` with its contents intact, says where, and leaves the mod's name free.
-- **A dangling link** at a mod's name holds no data, and Silo may remove it.
+  that resolves somewhere else) must still exist byte for byte: in place, or moved to
+  `mods/backups` with a notice saying where.
+- **What Silo treats as its own projection** (a byte-identical copy, a hardlink of the archived
+  file, a link that resolves to the archived copy, an unchanged marked folder copy) may be
+  removed. That is by design: copy-mode projections (another drive, exFAT, cloud-synced folders)
+  are exactly such copies. It's a pass only if the same content is still in the archive afterwards,
+  unchanged from the baseline; removing a link must leave its target intact.
+- **A dangling link** holds no data, and Silo may remove it.
 - A hardlink shares its data with the archived copy, so editing the file through either name
   changes both. Test removing the hardlink, not editing through it.
+
+Any step that removes content that then exists nowhere else, unchanged, fails the RC.
 
 ### E. Degraded network
 
