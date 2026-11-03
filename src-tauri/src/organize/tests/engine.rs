@@ -1213,3 +1213,78 @@ fn a_zip_projection_goes_while_the_archive_holds_its_bytes() {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+// #427: a mod deleted after the Organize preview is reported, not silently skipped.
+#[test]
+fn filing_a_mod_that_is_gone_says_so() {
+    let base = std::env::temp_dir().join(format!("silo_file_gone_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&base);
+    let gone = ModInput {
+        tech_name: "FS25_Gone".into(),
+        file_name: "FS25_Gone.zip".into(),
+        kind: "zip".into(),
+        category: "Vehicles".into(),
+        subcategory: None,
+    };
+    let rep = apply_organize(&conn, &layout, &base, &[gone]);
+    assert_eq!((rep.changed, rep.skipped), (0, 1));
+    assert_eq!(
+        rep.errors,
+        vec!["FS25_Gone: FS25_Gone.zip is no longer there, so Silo didn't file it.".to_string()]
+    );
+    assert!(db::load_organized(&conn, &crate::modsroot::canonical_key(&base)).is_empty());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// #427: a file at a wanted mod's name that isn't Silo's copy is the change's problem only when
+// the change touched that mod; otherwise it's a standing one (Diagnose lists it).
+#[test]
+fn a_foreign_file_at_an_untouched_mods_name_is_standing_not_an_error() {
+    let base = std::env::temp_dir().join(format!("silo_standing_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&base);
+    std::fs::write(
+        base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"),
+        b"PK\x03\x04 archived",
+    )
+    .unwrap();
+    organize_row(&conn, &base, "FS25_Foo", "Vehicles", true);
+    let flat = base.join("FS25_Foo.zip");
+    std::fs::write(&flat, b"the user's own build").unwrap();
+    let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+
+    let other: HashSet<String> = ["FS25_Bar".to_string()].into_iter().collect();
+    let rep = set_active_touched(&conn, &layout, &on, Some(&other));
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.standing.len(), 1);
+    assert!(
+        rep.standing[0].starts_with("FS25_Foo: FS25_Foo.zip in your mods folder isn't Silo's copy")
+    );
+
+    let rep = set_active_touched(&conn, &layout, &on, Some(&on));
+    assert_eq!(
+        rep.errors.len(),
+        1,
+        "the change turned this mod on: its problem"
+    );
+    assert!(rep.standing.is_empty());
+
+    let rep = set_active(&conn, &layout, &on);
+    assert_eq!(
+        rep.errors.len(),
+        1,
+        "without a touched set, reported as before"
+    );
+
+    assert_eq!(
+        std::fs::read(&flat).unwrap(),
+        b"the user's own build",
+        "never replaced"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}

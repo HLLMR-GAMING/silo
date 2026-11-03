@@ -3339,6 +3339,7 @@ async fn set_active(
     app: tauri::AppHandle,
     root: Option<String>,
     active: Vec<String>,
+    touched: Option<Vec<String>>,
 ) -> Result<organize::Report, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
@@ -3348,7 +3349,12 @@ async fn set_active(
         let layout = primary_layout(root)?;
         let conn = db::open(&db)?;
         let set: HashSet<String> = active.into_iter().collect();
-        Ok(organize::set_active(&conn, &layout, &set))
+        let touched: Option<HashSet<String>> = touched.map(|t| t.into_iter().collect());
+        let rep = organize::set_active_touched(&conn, &layout, &set, touched.as_ref());
+        for p in &rep.standing {
+            log::info!("left as it was (not part of this change): {p}");
+        }
+        Ok(rep)
     })
     .await
     .map_err(|e| e.to_string())?

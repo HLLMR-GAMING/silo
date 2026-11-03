@@ -53,6 +53,12 @@ pub fn apply_organize(
         }
         let from = source.join(&m.file_name);
         if !from.exists() {
+            // Gone since the caller listed it (deleted or moved after the preview): say so, or
+            // the result reads "Filed 0 mods" with no reason.
+            rep.errors.push(format!(
+                "{}: {} is no longer there, so Silo didn't file it.",
+                m.tech_name, m.file_name
+            ));
             rep.skipped += 1;
             continue;
         }
@@ -123,6 +129,19 @@ pub fn apply_organize(
 /// Reconcile the flat-root projection to exactly `active`: link the ones that
 /// should be active, remove links for the ones that shouldn't.
 pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) -> Report {
+    set_active_touched(conn, layout, active, None)
+}
+
+/// [`set_active`] for a change to the mods in `touched` (the ones the user turned on or off).
+/// A wanted mod outside it whose name already holds a file that isn't Silo's copy goes in
+/// `standing`, not `errors`: the change didn't cause it and Diagnose → Problems lists it. `None`
+/// reports it as an error, as before.
+pub fn set_active_touched(
+    conn: &Connection,
+    layout: &Layout,
+    active: &HashSet<String>,
+    touched: Option<&HashSet<String>>,
+) -> Report {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
@@ -261,10 +280,15 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 }
                 mark_active(conn, &key, &row, &mut rep);
             } else {
-                rep.errors.push(format!(
+                let problem = format!(
                     "{}: {} in your mods folder isn't Silo's copy of this mod, so Silo left it there and the game loads that file instead. Pick which build to keep in Diagnose → Problems.",
                     row.tech_name, row.file_name
-                ));
+                );
+                if touched.is_some_and(|t| !t.contains(&row.tech_name)) {
+                    rep.standing.push(problem);
+                } else {
+                    rep.errors.push(problem);
+                }
                 rep.skipped += 1;
             }
         } else {

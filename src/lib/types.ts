@@ -98,6 +98,8 @@ export interface OrganizeReport {
   notices: string[];
   /** set_active only: names left parked because another copy of the name is in the mods folder (#421). */
   otherCopies?: string[];
+  /** set_active with `touched` only: problems with mods the change didn't touch (#427). */
+  standing?: string[];
 }
 
 /** Provenance verdict of comparing an installed mod to its canonical build. */

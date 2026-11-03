@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Turning a mod on or off, or switching several at once, no longer reports another mod's
+  standing problem (a file at its name that isn't Silo's copy) as if the change had caused it.
+  The result lists only the mods you changed; Diagnose → Problems still lists the rest. (#427)
+- When a mod in the Organize preview is deleted or moved before you confirm, Silo now says it's
+  no longer there instead of "Filed 0 mods" with no reason. (#427)
+
 ## [1.0.4] - 2026-11-02
 
 This release includes a **security fix**: a folder mod could make Silo read files outside the

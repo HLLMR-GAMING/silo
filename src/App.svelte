@@ -990,7 +990,10 @@
     let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
     try {
       try {
-        const rep = await applyActive(techNames);
+        // Only the mods this switch turns on or off: a standing problem with another one is
+        // Diagnose's to show, not this switch's result (#427).
+        const touched = [...next].filter((t) => !before.has(t)).concat([...before].filter((t) => !next.has(t)));
+        const rep = await applyActive(techNames, touched);
         errors = rep.errors.length;
         recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
       } catch (e) {
@@ -1170,8 +1173,8 @@
   // Apply an active set and surface any warnings the projection engine reports — e.g. it
   // refused to remove a file you'd swapped in at a mod's name. These come back in the
   // report, not as a thrown error, so a plain `await setActive` would drop them silently.
-  async function applyActive(techNames: string[]) {
-    const rep = await setActive(techNames);
+  async function applyActive(techNames: string[], touched?: string[]) {
+    const rep = await setActive(techNames, touched);
     if (rep.errors.length) errorMsg = rep.errors.slice(0, 3).join("; ");
     if (rep.notices?.length) infoMsg = rep.notices.join(" ");
     return rep;
@@ -1358,7 +1361,8 @@
     let keptParked: boolean = false; // set_active left this copy parked for another one (#421)
     try {
       try {
-        const rep = await applyActive([...next]);
+        // Only this mod's problems are the switch's; others are Diagnose's to show (#427).
+        const rep = await applyActive([...next], [techName]);
         errors = rep.errors.length;
         recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
         keptParked = !turningOff && (rep.otherCopies ?? []).includes(techName);
@@ -2773,7 +2777,8 @@
         let clean = true;
         let otherCopies: string[] = []; // names set_active left parked for another copy (#421)
         try {
-          const rep = await applyActive([...next]); // reports its own problems
+          // Reports its own problems: only these mods' (#427).
+          const rep = await applyActive([...next], techNames);
           clean = rep.errors.length === 0;
           otherCopies = rep.otherCopies ?? [];
         } catch (e) {
