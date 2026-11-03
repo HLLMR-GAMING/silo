@@ -122,6 +122,7 @@
     foreign={null}
     onAdoptForeign={noop}
     onRestoreForeign={noop}
+    onRemove={noop}
   />
 {/snippet}
 

@@ -90,6 +90,36 @@ export interface ModInput {
   subcategory: string | null;
 }
 
+/** A mod a removal plan will take (#429), as the confirmation names it. */
+export interface PlannedRemoval {
+  techName: string;
+  /** The path the Library showed for it. */
+  path: string;
+  /** The file or folder name that goes to the bin. */
+  fileName: string;
+  kind: "zip" | "dir";
+  /** It's on now: parked first. */
+  on: boolean;
+}
+
+/** What Silo found when asked to remove mods (#429): what it will remove, and why any it won't. */
+export interface RemovalPlan {
+  items: PlannedRemoval[];
+  refused: string[];
+}
+
+/** What removing mods from the library did (#429). */
+export interface RemoveReport {
+  /** The mods whose file or folder is gone, as asked for: `recycled` when it's in the Recycle
+   *  Bin, false when Windows deleted it permanently (it asks first) or it wasn't confirmed there. */
+  removed: { techName: string; path: string; recycled: boolean }[];
+  /** Why the others didn't, one line each ("FS25_X: …"). */
+  errors: string[];
+  /** Anything else to tell: where parking kept an edited copy, and which were deleted
+   *  permanently instead of recycled. */
+  notices: string[];
+}
+
 export interface OrganizeReport {
   changed: number;
   skipped: number;

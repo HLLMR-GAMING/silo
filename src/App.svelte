@@ -32,6 +32,9 @@
     planOrganize,
     applyOrganize,
     setActive,
+    planRemoval,
+    removeFromLibrary,
+    safeFirstDialog,
     flatten,
     clearScanCache,
     getSavegames,
@@ -100,6 +103,8 @@
   } from "./lib/configSchemas";
   import type {
     ModEntry,
+    RemovalPlan,
+    RemoveReport,
     ScanResult,
     CurationRow,
     ModInput,
@@ -150,7 +155,8 @@
     type OpToken,
   } from "./lib/state/ops.svelte";
   import { createScanSettler, focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
-  import { describeError, formatDetail, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
+  import { describeError, formatDetail, isWindowsPlatform, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
+  import { removeConfirmText, removedText, removeVerb } from "./lib/removeMods";
   import {
     info,
     inlineError,
@@ -2709,6 +2715,64 @@
   }
 
   /**
+   * Remove from library (#429): a confirmation that names the mods and says their files go to the
+   * Recycle Bin (Cancel first, and focused), then the backend moves each file or folder there,
+   * parking an active library mod first. The folder is read again afterwards.
+   * @param list the mods to remove (the drawer's mod, or the selection)
+   */
+  async function removeMods(list: ModEntry[]) {
+    if (list.length === 0) return;
+    const busy = writeRefusal();
+    if (busy) {
+      refuse(busy);
+      return;
+    }
+    const windows = isWindowsPlatform();
+    const failed = (lines: string[]) => {
+      const more = lines.length > 3 ? ` (and ${lines.length - 3} more)` : "";
+      reportError(lines.slice(0, 3).join("; ") + more, "Removing mods from the library");
+    };
+    // Step one: Silo checks each mod and notes what it is; the confirmation names what it found.
+    let planned: [number, RemovalPlan];
+    try {
+      planned = await planRemoval(list.map((m) => ({ techName: m.techName, path: m.path })));
+    } catch (e) {
+      reportError(e, "Removing mods from the library");
+      return;
+    }
+    const [planId, plan] = planned;
+    if (plan.items.length === 0) {
+      if (plan.refused.length > 0) failed(plan.refused);
+      return;
+    }
+    const titles = new Map(list.map((m) => [m.path, m.title]));
+    const removing = plan.items.map((p) => ({ ...p, title: titles.get(p.path) ?? null }));
+    if (!(await safeFirstDialog(removeConfirmText(removing, windows), { safe: "Cancel", verb: removeVerb(windows) })))
+      return;
+    // Step two: anything that changed since is refused before it's touched.
+    const op = beginWrite(plan.items.length === 1 ? "Removing a mod" : `Removing ${modsCount(plan.items.length)}`);
+    if (!op) return;
+    let rep: RemoveReport | null = null;
+    try {
+      rep = await removeFromLibrary(planId);
+    } catch (e) {
+      reportError(e, "Removing mods from the library");
+    } finally {
+      op.end();
+    }
+    if (!rep) return;
+    const gone = new Set(rep.removed.map((r) => r.path));
+    if (detailMod && gone.has(detailMod.path)) detailMod = null;
+    if (gone.size > 0) selection.clear();
+    await runScan(false);
+    const done = removedText(rep.removed, removing, windows);
+    if (done) success(done);
+    if (rep.notices.length > 0) info(rep.notices.join(" "), { duration: 10_000 });
+    const problems = [...plan.refused, ...rep.errors];
+    if (problems.length > 0) failed(problems);
+  }
+
+  /**
    * BulkBar Turn on / Park (the sequence and its dialogs are in library/bulkSwitch.ts): loose mods
    * being parked are filed into the library first, always after a dialog that says so; the rest
    * switch through the projection; then the switch toast offers Undo.
@@ -4204,6 +4268,7 @@
         }}
         source={sourceMap[dm.techName] ?? null}
         onSourceChange={(row) => setSource(dm.techName, row)}
+        onRemove={() => removeMods([dm])}
         onInstalled={() => {
           detailMod = null;
           runScan(false);
@@ -4326,6 +4391,7 @@
               onhide={(on) => setCurationFor(selectedMods, "hidden", on)}
               onskipupdates={(on) => setCurationFor(selectedMods, "skipUpdates", on)}
               onmodsets={() => openMembership(selectedMods, true)}
+              onremove={() => removeMods(selectedMods)}
               onselectall={() => selection.selectAll(visibleKeys)}
               onclear={() => selection.clear()}
             />

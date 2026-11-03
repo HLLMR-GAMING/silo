@@ -17,6 +17,8 @@ import type {
   TagRow,
   ModInput,
   OrganizeReport,
+  RemovalPlan,
+  RemoveReport,
   PlannedMove,
   VerifyResult,
   Loadout,
@@ -438,6 +440,18 @@ export function verifyMod(
  *  didn't cause comes back in `standing`, not `errors` (#427). */
 export function setActive(active: string[], touched?: string[]): Promise<OrganizeReport> {
   return invoke<OrganizeReport>("set_active", { root: null, active, touched: touched ?? null });
+}
+
+/** Remove from library, step one (#429): check the mods (by the path the Library shows) and note
+ *  what each is. Nothing changes. Returns the plan's id and what it will remove. */
+export function planRemoval(items: { techName: string; path: string }[]): Promise<[number, RemovalPlan]> {
+  return invoke<[number, RemovalPlan]>("plan_removal", { items });
+}
+
+/** Remove from library, step two (#429): carry out the confirmed plan. Files go to the Recycle
+ *  Bin, active library mods are parked first, and anything changed since the plan is refused. */
+export function removeFromLibrary(planId: number): Promise<RemoveReport> {
+  return invoke<RemoveReport>("remove_from_library", { planId });
 }
 
 export function flatten(): Promise<OrganizeReport> {

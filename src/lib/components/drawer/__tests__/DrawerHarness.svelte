@@ -72,6 +72,7 @@
       foreign={null}
       onAdoptForeign={noop}
       onRestoreForeign={noop}
+      onRemove={noop}
     />
   </aside>
 {/if}

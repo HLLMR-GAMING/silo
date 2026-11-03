@@ -33,6 +33,7 @@ pub mod paths;
 mod picked;
 pub mod profile;
 pub mod provenance;
+mod recycle;
 pub mod relocate;
 pub mod savegame;
 pub mod scan;
@@ -931,6 +932,9 @@ fn config_write_refusal(game_running: bool) -> Result<(), String> {
         Ok(())
     }
 }
+
+/// Removing a mod moves its file to the Recycle Bin, which fails part-way while the game holds it.
+const REMOVE_GAME_RUNNING: &str = "Close Farming Simulator 25 first. Silo won't remove a mod while      the game is starting or using it. If it didn't start, try again in half a minute.";
 
 /// "Use this version" and "Keep Silo's copy" move a mod's file in and out of the mods folder,
 /// which fails part-way while the game holds it open.
@@ -3305,6 +3309,80 @@ async fn adopt_foreign_file(
         let layout = primary_layout(root)?;
         let conn = db::open(&db)?;
         organize::adopt_foreign(&conn, &layout, &file_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
+}
+
+/// The removal plan the user is being asked to confirm (#429): its id, the mods folder it was
+/// made for, and each planned mod's evidence. One at a time; a new plan replaces it.
+type PendingRemoval = (u64, String, Vec<(organize::Planned, organize::Evidence)>);
+static PENDING_REMOVAL: std::sync::Mutex<Option<PendingRemoval>> = std::sync::Mutex::new(None);
+
+/// Check the mods the Library asks to remove and record what each one is, for the confirmation
+/// (#429). Nothing changes on disk. `remove_from_library` with the returned id carries it out.
+#[tauri::command]
+async fn plan_removal(
+    app: tauri::AppHandle,
+    items: Vec<organize::RemoveRequest>,
+) -> Result<(u64, organize::RemovalPlan), error::AppError> {
+    ensure_no_move()?;
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<(u64, organize::RemovalPlan), String> {
+        let _write = library_write()?;
+        let (layout, key) = active_layout()?;
+        let conn = db::open(&db)?;
+        let archive_ok = ensure_archive_available().is_ok();
+        let (plan, found) = organize::plan_removal(&conn, &layout, &items, archive_ok);
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *PENDING_REMOVAL.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, key, found));
+        Ok((id, plan))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
+}
+
+/// Carry out the confirmed removal plan `plan_id` (#429): each mod is checked again against what
+/// was confirmed, an active library mod is parked first, and each file or folder goes to the
+/// Recycle Bin / Trash (`recycle::move_to_bin`). Refused while FS25 runs or starts, a move is
+/// under way, or the plan is gone or was made for another mods folder. The caller rescans.
+#[tauri::command]
+async fn remove_from_library(
+    app: tauri::AppHandle,
+    plan_id: u64,
+) -> Result<organize::RemoveReport, error::AppError> {
+    ensure_no_move()?;
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<organize::RemoveReport, String> {
+        let _write = library_write()?;
+        // Admitted once the write is ours (waiting for it can take a while, and the game may
+        // have started meanwhile); Play waits until it's done.
+        let _admitted = admit_removal()?;
+        let stale = "That removal is out of date. Choose the mods and remove them again.";
+        let (id, key, planned) = PENDING_REMOVAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or(stale)?;
+        let (layout, now) = active_layout()?;
+        if id != plan_id || key != now {
+            return Err(stale.into());
+        }
+        let conn = db::open(&db)?;
+        let archive_ok = ensure_archive_available().is_ok();
+        let rep = organize::carry_out(&conn, &layout, &planned, archive_ok, &recycle::move_to_bin);
+        log::info!(
+            "removed {} mod(s) from the library to the Recycle Bin ({} not removed)",
+            rep.removed.len(),
+            rep.errors.len()
+        );
+        for e in &rep.errors {
+            log::warn!("not removed: {e}");
+        }
+        Ok(rep)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -5985,6 +6063,34 @@ fn admit_move() -> Result<(), String> {
     Ok(())
 }
 
+/// Raised (under the launch gate) while a removal (#429) is changing files: Play waits for it.
+static REMOVE_ADMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lowers `REMOVE_ADMITTED` when the removal is done, however it ends.
+struct RemoveAdmission;
+
+impl Drop for RemoveAdmission {
+    fn drop(&mut self) {
+        REMOVE_ADMITTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Admit a removal (#429), as `admit_move` admits a move: refused while the game runs, or a Play
+/// is in flight or started it moments ago (it may not show up as running yet). The caller holds
+/// the library write lock.
+fn admit_removal() -> Result<RemoveAdmission, String> {
+    // The process list first: reading it takes a moment, and Play shouldn't wait on it.
+    if gamelaunch::fs25_running() || gamelaunch::profile_launch_pending() {
+        return Err(REMOVE_GAME_RUNNING.into());
+    }
+    let gate = launch_gate();
+    if gate.launching(launch_clock()) {
+        return Err(REMOVE_GAME_RUNNING.into());
+    }
+    REMOVE_ADMITTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(RemoveAdmission)
+}
+
 /// A Play admitted through the launch gate; `started` records that the start went out. Dropped
 /// without it (a refusal, an error, a panic), the Play is simply done.
 struct LaunchTicket {
@@ -5994,8 +6100,17 @@ struct LaunchTicket {
 impl LaunchTicket {
     /// Admit a Play, or refuse it (`MOVE_RUNNING`) while a move is admitted.
     fn take() -> Result<LaunchTicket, error::AppError> {
-        if launch_gate().begin_launch(move_in_progress()) {
+        // Both read under the gate's lock (the receiver is taken first), as they're raised.
+        if launch_gate().begin_launch(
+            move_in_progress() || REMOVE_ADMITTED.load(std::sync::atomic::Ordering::SeqCst),
+        ) {
             return Ok(LaunchTicket { started: false });
+        }
+        if !move_in_progress() {
+            return Err(error::AppError::new(
+                error::code::LIBRARY_BUSY,
+                "Silo is removing mods. Play again in a moment.",
+            ));
         }
         Err(move_play_gate(true, Ok(Vec::new()), true).expect_err("refused while a move is"))
     }
@@ -8132,6 +8247,8 @@ pub fn run() {
         detect_foreign_files,
         adopt_foreign_file,
         restore_foreign_file,
+        plan_removal,
+        remove_from_library,
         relink_projections,
         hardlink_support,
         app_busy,

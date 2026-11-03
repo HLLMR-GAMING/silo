@@ -1518,6 +1518,27 @@ pub fn delete_organized(conn: &Connection, root: &str, tech_name: &str) -> Resul
     Ok(())
 }
 
+/// Drop a removed mod's library row and its projection record together (#429), or neither.
+pub fn drop_library_row(
+    conn: &Connection,
+    root: &str,
+    tech_name: &str,
+    file_name: &str,
+) -> Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM organized WHERE root = ?1 AND tech_name = ?2",
+        rusqlite::params![root, tech_name],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
+        rusqlite::params![root, file_name],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
 /// Record a projected file's identity (size + mtime) so a later remove can confirm it's Silo's
 /// own untouched copy without hashing it.
 pub fn record_projection(conn: &Connection, root: &str, file_name: &str, size: u64, mtime_ms: i64) {
@@ -1579,6 +1600,13 @@ pub fn reconcile_organized(
     for existing in load_organized(&tx, root) {
         if !keep.contains(existing.tech_name.as_str()) {
             delete_organized(&tx, root, &existing.tech_name)?;
+            // Its projection record goes too: left behind, it could vouch for whatever is put
+            // at that name later (#429).
+            tx.execute(
+                "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
+                rusqlite::params![root, existing.file_name],
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     for row in desired {

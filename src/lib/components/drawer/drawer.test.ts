@@ -108,6 +108,7 @@ function props(mod: ModEntry, over: Record<string, unknown> = {}) {
     foreign: null,
     onAdoptForeign: vi.fn(),
     onRestoreForeign: vi.fn(),
+    onRemove: vi.fn(),
     ...over,
   };
 }
@@ -355,6 +356,7 @@ describe("drawer actions", () => {
       "Change category…",
       "Show file",
       "Find in Browse",
+      "Remove from library…",
     ]);
     await user.click(within(menu).getByRole("menuitem", { name: "Flag" }));
     expect(p.onToggle).toHaveBeenCalledWith("broken");
@@ -363,6 +365,11 @@ describe("drawer actions", () => {
     await settle();
     await user.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Show file" }));
     expect(revealInFolder).toHaveBeenCalledWith("C:/mods/FS25_Mod4.zip");
+
+    await user.click(more);
+    await settle();
+    await user.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Remove from library…" }));
+    expect(p.onRemove).toHaveBeenCalledTimes(1);
 
     await user.click(more);
     await settle();
