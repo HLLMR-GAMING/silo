@@ -640,3 +640,54 @@ fn a_slot_silo_cant_inspect_refuses() {
     assert!(src.is_file());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// #423: two copies of a mod in the library, only one recorded. Keeping the recorded one removes
+// the other, which has no row; another row's copy, or a stray file, is never taken that way.
+#[test]
+fn a_second_archived_copy_without_a_row_can_be_removed() {
+    let (base, conn, layout, src) = library_with_foo("rm_second_copy", false);
+    let other_cat = layout.archive.join("Tools");
+    std::fs::create_dir_all(&other_cat).unwrap();
+    let second = other_cat.join("FS25_Foo.zip");
+    std::fs::write(&second, b"PK the second copy").unwrap();
+    let bin = base.join("bin");
+    let (plan, rep) = remove(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &second)],
+        true,
+        &bin_at(&bin),
+    );
+    assert_eq!(plan.items.len(), 1, "{:?}", plan.refused);
+    assert!(!plan.items[0].on, "not loaded, nothing to park");
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(
+        std::fs::read(bin.join("FS25_Foo.zip")).unwrap(),
+        b"PK the second copy"
+    );
+    assert!(src.is_file(), "the recorded copy stays");
+    assert_eq!(
+        db::load_organized(&conn, &key_of(&layout)).len(),
+        1,
+        "its row stays"
+    );
+
+    // Not the named mod, or another mod's recorded copy: refused.
+    std::fs::write(other_cat.join("FS25_Bar.zip"), b"PK").unwrap();
+    organize_row(&conn, &layout.mods, "FS25_Bar", "Tools", false);
+    std::fs::write(other_cat.join("notes.zip"), b"PK").unwrap();
+    let (plan, _) = remove(
+        &conn,
+        &layout,
+        &[
+            req("FS25_Foo", &other_cat.join("FS25_Bar.zip")),
+            req("FS25_Foo", &other_cat.join("notes.zip")),
+        ],
+        true,
+        &no_bin,
+    );
+    assert!(plan.items.is_empty());
+    assert_eq!(plan.refused.len(), 2, "{:?}", plan.refused);
+    assert!(other_cat.join("FS25_Bar.zip").is_file() && other_cat.join("notes.zip").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}

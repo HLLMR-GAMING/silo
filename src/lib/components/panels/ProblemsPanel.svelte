@@ -25,7 +25,13 @@
       corrupt: ModEntry[];
       ignored: ModEntry[];
       foreign: ForeignFile[];
+      /** Mods found more than once (#423): the game loads only one copy. */
+      duplicates?: { techName: string; copies: ModEntry[] }[];
     };
+    /** Whether this copy is the one the game loads now. */
+    loadsNow?: (m: ModEntry) => boolean;
+    /** Keep `keep` and remove the other copies (App confirms; they go to the Recycle Bin). */
+    onKeepCopy?: (keep: ModEntry, others: ModEntry[]) => void;
     /** Whether a mod is active (Park shows only for active mods). */
     isActive?: (techName: string) => boolean;
     onFindInBrowse?: (techName: string) => void;
@@ -44,10 +50,20 @@
     onPark,
     onResolveForeign,
     lockReason = "",
+    loadsNow = () => false,
+    onKeepCopy,
   }: Props = $props();
+  const duplicates = $derived(health.duplicates ?? []);
+  /** Where a copy is, in words. */
+  const where = (m: ModEntry) => (m.organized ? "in your library" : "in your mods folder");
+  const entry = (m: ModEntry) => m.path.split(/[\\/]/).pop() ?? m.path;
 
   const total = $derived(
-    health.missingDeps.length + health.corrupt.length + health.ignored.length + health.foreign.length,
+    health.missingDeps.length +
+      health.corrupt.length +
+      health.ignored.length +
+      health.foreign.length +
+      (health.duplicates?.length ?? 0),
   );
 
   /** The file whose choice is running (its buttons are off meanwhile). */
@@ -97,6 +113,40 @@
               {/each}
             </div>
           {/if}
+        </li>
+      {/each}
+    </ul>
+  {/if}
+
+  {#if duplicates.length > 0}
+    <h4 class="hz-group">More than one copy of a mod ({formatCount(duplicates.length)})</h4>
+    <ul class="rows">
+      {#each duplicates as g (g.techName)}
+        <li class="hz-row">
+          <div class="hz-name">{name(g.copies[0])}</div>
+          <p class="hz-detail">
+            The game loads only one copy of a mod. Keep the one you want; the other {g.copies.length === 2
+              ? "copy goes"
+              : "copies go"} to the Recycle Bin.
+          </p>
+          <ul class="copies">
+            {#each g.copies as c (c.path)}
+              <li class="copy">
+                <span class="copy-what">
+                  <code>{entry(c)}</code>, {where(c)}, {ver(c.version)}{#if loadsNow(c)}<span class="loads">
+                      · the game loads this one</span
+                    >{/if}
+                </span>
+                {#if onKeepCopy}
+                  <Button
+                    size="sm"
+                    disabled={!!lockReason}
+                    onclick={() => onKeepCopy(c, g.copies.filter((o) => o.path !== c.path))}>Keep this one</Button
+                  >
+                {/if}
+              </li>
+            {/each}
+          </ul>
         </li>
       {/each}
     </ul>
@@ -233,5 +283,25 @@
     gap: 6px;
     flex-wrap: wrap;
     margin-top: 8px;
+  }
+  .copies {
+    list-style: none;
+    margin: var(--space-2, 8px) 0 0;
+    padding: 0;
+    display: grid;
+    gap: var(--space-2, 8px);
+  }
+  .copy {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3, 12px);
+  }
+  .copy-what {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .loads {
+    color: var(--text-muted, inherit);
   }
 </style>

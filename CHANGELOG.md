@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmed is left alone. A mod set that lists a removed mod keeps it and shows it as not in your
   library. A link in your mods folder, or Silo's own copy of a library mod, is left for you to
   handle. (#429)
+- **Diagnose → Problems lists a mod you have more than one copy of** (an unzipped folder beside
+  its zip, say, or two copies in your library), since the game loads only one. Each copy shows
+  where it is, its version and whether the game loads it now, with **Keep this one**: after a
+  confirmation, the other copies go to the Recycle Bin the same way Remove from library works.
+  (#423)
 
 ### Fixed
 

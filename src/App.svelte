@@ -157,6 +157,7 @@
   import { createScanSettler, focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
   import { describeError, formatDetail, isWindowsPlatform, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import { removeConfirmText, removedText, removeVerb } from "./lib/removeMods";
+  import { duplicateCopies } from "./lib/duplicates";
   import {
     info,
     inlineError,
@@ -830,13 +831,20 @@
       const miss = m.dependencies.filter((d) => !lib.has(d));
       if (miss.length > 0) missingDeps.push({ mod: m, missing: miss });
     }
-    return { missingDeps, corrupt, ignored, foreign: foreignFiles };
+    // More than one copy of a tech name (#423), unless it's a different build at the mod's own
+    // name: that has its own section and choices.
+    const duplicates = duplicateCopies(
+      mods,
+      foreignFiles.map((f) => f.fileName),
+    );
+    return { missingDeps, corrupt, ignored, foreign: foreignFiles, duplicates };
   });
   const healthCount = $derived(
     health.missingDeps.length +
       health.corrupt.length +
       health.ignored.length +
-      health.foreign.length,
+      health.foreign.length +
+      health.duplicates.length,
   );
 
   const criticalCount = $derived(
@@ -2720,7 +2728,7 @@
    * parking an active library mod first. The folder is read again afterwards.
    * @param list the mods to remove (the drawer's mod, or the selection)
    */
-  async function removeMods(list: ModEntry[]) {
+  async function removeMods(list: ModEntry[], keep?: ModEntry) {
     if (list.length === 0) return;
     const busy = writeRefusal();
     if (busy) {
@@ -2747,7 +2755,14 @@
     }
     const titles = new Map(list.map((m) => [m.path, m.title]));
     const removing = plan.items.map((p) => ({ ...p, title: titles.get(p.path) ?? null }));
-    if (!(await safeFirstDialog(removeConfirmText(removing, windows), { safe: "Cancel", verb: removeVerb(windows) })))
+    // Keeping one copy of a mod (#423): say which one stays.
+    const lead = keep ? `Keep ${fileName(keep.path)} (${keep.organized ? "in your library" : "in your mods folder"}). ` : "";
+    if (
+      !(await safeFirstDialog(lead + removeConfirmText(removing, windows), {
+        safe: "Cancel",
+        verb: removeVerb(windows),
+      }))
+    )
       return;
     // Step two: anything that changed since is refused before it's touched.
     const op = beginWrite(plan.items.length === 1 ? "Removing a mod" : `Removing ${modsCount(plan.items.length)}`);
@@ -4633,6 +4648,8 @@
               onPark={(t) => void parkMod(t)}
               onResolveForeign={resolveForeign}
               lockReason={fgLock.reason}
+              loadsNow={isOn}
+              onKeepCopy={(keep, others) => void removeMods(others, keep)}
             />
           </ViewBoundary>
         {/snippet}

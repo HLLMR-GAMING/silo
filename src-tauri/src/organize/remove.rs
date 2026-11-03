@@ -296,10 +296,81 @@ fn check(
     r: &RemoveRequest,
     archive_ok: bool,
 ) -> Result<(Planned, Evidence), String> {
+    let given = Path::new(&r.path);
     match library_row(layout, rows, r) {
         Some(row) => check_library(layout, row, r, archive_ok),
+        // In a category folder of the archive, with no row of its own: a second copy (#423).
+        None if given.parent().and_then(Path::parent) == Some(layout.archive.as_path()) => {
+            check_archived_copy(layout, rows, r, archive_ok)
+        }
         None => check_loose(layout, rows, r),
     }
+}
+
+/// Whether the entry `name` (`meta` its own metadata) is mod `tech` itself: a zip named after it,
+/// or a folder of that name holding `modDesc.xml`.
+fn is_the_mod(path: &Path, name: &str, meta: &std::fs::Metadata, tech: &str) -> bool {
+    if meta.is_dir() {
+        name.eq_ignore_ascii_case(tech) && path.join("modDesc.xml").is_file()
+    } else {
+        name.len() > 4
+            && name[name.len() - 4..].eq_ignore_ascii_case(".zip")
+            && name[..name.len() - 4].eq_ignore_ascii_case(tech)
+    }
+}
+
+/// A second archived copy of a mod, with no library row of its own (#423: two copies of one mod
+/// in the library, only one of them recorded): the named mod itself, really in a category folder
+/// of the archive (not a link, the category folder not a link, the default archive not a link),
+/// and no row's archived copy. It isn't loaded, so nothing is parked.
+fn check_archived_copy(
+    layout: &Layout,
+    rows: &[OrganizedRow],
+    r: &RemoveRequest,
+    archive_ok: bool,
+) -> Result<(Planned, Evidence), String> {
+    if !archive_ok {
+        return Err("your library archive isn't reachable, so Silo won't remove it.".into());
+    }
+    if layout.archive_is_default() && is_link(&layout.archive) != Some(false) {
+        return Err(
+            "your library archive folder is a link or can't be read, so Silo won't remove it."
+                .into(),
+        );
+    }
+    let path = PathBuf::from(&r.path);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::paths::safe_file_name(&name)?;
+    if rows
+        .iter()
+        .any(|row| archive_path(&layout.archive, &row.category, &row.file_name) == path)
+    {
+        return Err(format!(
+            "{name} is another mod's copy in your library, so Silo left it alone."
+        ));
+    }
+    let meta = path
+        .symlink_metadata()
+        .map_err(|_| format!("{name} is no longer there."))?;
+    if meta.file_type().is_symlink() || !is_the_mod(&path, &name, &meta, &r.tech_name) {
+        return Err(format!("{name} isn't that mod, so Silo left it alone."));
+    }
+    let category = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    really_at(&path, &category, Some(&layout.archive))?;
+    let evidence = evidence_of(&path, &[&layout.mods, &layout.archive, &category])?;
+    Ok((
+        Planned {
+            tech_name: r.tech_name.clone(),
+            path: r.path.clone(),
+            file_name: name,
+            kind: evidence.kind.into(),
+            on: false,
+        },
+        evidence,
+    ))
 }
 
 fn check_library(
@@ -369,14 +440,7 @@ fn check_loose(
         ));
     }
     let kind = if meta.is_dir() { "dir" } else { "zip" };
-    let is_it = if meta.is_dir() {
-        name.eq_ignore_ascii_case(&r.tech_name) && path.join("modDesc.xml").is_file()
-    } else {
-        name.len() > 4
-            && name[name.len() - 4..].eq_ignore_ascii_case(".zip")
-            && name[..name.len() - 4].eq_ignore_ascii_case(&r.tech_name)
-    };
-    if !is_it {
+    if !is_the_mod(&path, &name, &meta, &r.tech_name) {
         return Err(format!("{name} isn't that mod, so Silo left it alone."));
     }
     really_at(&path, &layout.mods, None)?;

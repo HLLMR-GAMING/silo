@@ -131,6 +131,41 @@ function entry(techName: string, over: Partial<ModEntry> = {}): ModEntry {
 }
 
 describe("Problems", () => {
+  it("lists a mod found twice, and Keep this one keeps that copy and removes the other (#423)", async () => {
+    const user = userEvent.setup();
+    const parked = entry("FS25_Foo", { path: "C:/mods/archive/Vehicles/FS25_Foo.zip", organized: true, version: "1.0.0.0" });
+    const loose = entry("FS25_Foo", { path: "C:/mods/FS25_Foo", organized: false, version: "1.1.0.0" });
+    const onKeepCopy = vi.fn();
+    render(ProblemsPanel, {
+      health: { missingDeps: [], corrupt: [], ignored: [], foreign: [], duplicates: [{ techName: "FS25_Foo", copies: [parked, loose] }] },
+      onResolveForeign: vi.fn(),
+      loadsNow: (m: ModEntry) => m.path === loose.path,
+      onKeepCopy,
+    });
+    expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("1 mod needs attention");
+    expect(screen.getByRole("heading", { level: 4 })).toHaveTextContent("More than one copy of a mod (1)");
+    const copies = screen.getAllByRole("listitem").filter((li) => li.classList.contains("copy"));
+    expect(copies[0]).toHaveTextContent("FS25_Foo.zip, in your library, 1.0");
+    expect(copies[1]).toHaveTextContent("FS25_Foo, in your mods folder");
+    expect(copies[1]).toHaveTextContent("the game loads this one");
+    expect(copies[0]).not.toHaveTextContent("the game loads this one");
+    const keep = screen.getAllByRole("button", { name: "Keep this one" });
+    await user.click(keep[0]);
+    expect(onKeepCopy).toHaveBeenCalledWith(parked, [loose]);
+  });
+
+  it("Keep this one waits while another library change runs", () => {
+    const a = entry("FS25_Foo", { path: "a/FS25_Foo.zip" });
+    const b = entry("FS25_Foo", { path: "b/FS25_Foo.zip" });
+    render(ProblemsPanel, {
+      health: { missingDeps: [], corrupt: [], ignored: [], foreign: [], duplicates: [{ techName: "FS25_Foo", copies: [a, b] }] },
+      onResolveForeign: vi.fn(),
+      onKeepCopy: vi.fn(),
+      lockReason: "Silo is moving mods.",
+    });
+    for (const b2 of screen.getAllByRole("button", { name: "Keep this one" })) expect(b2).toBeDisabled();
+  });
+
   it("each group has its actions", async () => {
     const user = userEvent.setup();
     const onFindInBrowse = vi.fn();
