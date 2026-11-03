@@ -442,7 +442,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
                             .as_mut()
                             .and_then(|c| c.get_mut(&row.tech_name.to_ascii_lowercase()))
                         {
-                            names.retain(|n| !n.eq_ignore_ascii_case(&row.file_name));
+                            names.retain(|n| !same_slot(n, &row.file_name));
                         }
                     }
                     Err(e) => {
@@ -460,7 +460,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             let other = copies.get(&tech_key).and_then(|names| {
                 names
                     .iter()
-                    .find(|n| !n.eq_ignore_ascii_case(&row.file_name))
+                    .find(|n| !same_slot(n, &row.file_name))
                     .cloned()
             });
             if let Some(other) = other {
@@ -477,7 +477,9 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
                 }
                 db::forget_projection(conn, &key, &row.file_name);
                 rep.skipped += 1;
-                retained.push(src.clone());
+                // As spelled on disk, so cleanup matches it exactly.
+                retained
+                    .push(spelled_on_disk(&layout.archive, &src).unwrap_or_else(|| src.clone()));
                 reported.push((src, is_dir));
                 continue;
             }
@@ -574,6 +576,16 @@ pub(crate) fn in_archive_entry(path: &Path, entry: &Path, is_dir: bool) -> bool 
 /// it (hardlinks whose names differ only that way), Silo can't tell which, so `None`, as when a
 /// part can't be listed or found: the caller then matches the recorded spelling only, so no
 /// other file is ever taken for the entry.
+/// Whether two entry names in one folder are the same slot: the same name, ignoring ASCII case
+/// where the file system usually does (Windows, macOS), exactly on Linux.
+fn same_slot(a: &str, b: &str) -> bool {
+    if cfg!(target_os = "linux") {
+        a == b
+    } else {
+        a.eq_ignore_ascii_case(b)
+    }
+}
+
 pub(crate) fn spelled_on_disk(archive: &Path, entry: &Path) -> Option<PathBuf> {
     let mut cur = archive.to_path_buf();
     for part in entry.strip_prefix(archive).ok()?.components() {
@@ -649,10 +661,7 @@ pub(crate) fn cleanup_empty_archive_keeping(
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            if keep
-                .iter()
-                .any(|k| k.as_os_str().eq_ignore_ascii_case(path.as_os_str()))
-            {
+            if keep.contains(&path) {
                 empty = false;
                 continue;
             }

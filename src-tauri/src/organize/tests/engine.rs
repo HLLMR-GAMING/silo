@@ -1505,3 +1505,121 @@ fn undo_organizing_keeps_a_left_folder_mod_whole() {
     assert!(base.join("FS25_Map.zip").is_file());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// #423: a folder mod left in a user-chosen archive keeps its empty folders too (that archive's
+// cleanup only removes empty category folders).
+#[test]
+fn undo_organizing_keeps_a_left_folder_mod_whole_in_a_custom_archive() {
+    let base = temp_dir_for("undo_twin_dir_custom");
+    let mods = base.join("mods");
+    let arch = base.join("elsewhere");
+    std::fs::create_dir_all(&mods).unwrap();
+    std::fs::create_dir_all(
+        arch.join("Maps")
+            .join("FS25_Map")
+            .join("data")
+            .join("empty"),
+    )
+    .unwrap();
+    std::fs::write(
+        arch.join("Maps").join("FS25_Map").join("modDesc.xml"),
+        "<modDesc/>",
+    )
+    .unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout {
+        mods: mods.clone(),
+        archive: arch.clone(),
+    };
+    db::upsert_organized(
+        &conn,
+        &crate::modsroot::canonical_key(&mods),
+        &OrganizedRow {
+            tech_name: "FS25_Map".into(),
+            file_name: "FS25_Map".into(),
+            kind: "dir".into(),
+            category: "Maps".into(),
+            subcategory: None,
+            active: false,
+        },
+    )
+    .unwrap();
+    std::fs::write(mods.join("FS25_Map.zip"), b"PK the zip copy").unwrap();
+    let rep = flatten(&conn, &layout);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.notices.len(), 1, "{:?}", rep.notices);
+    assert!(arch
+        .join("Maps")
+        .join("FS25_Map")
+        .join("data")
+        .join("empty")
+        .is_dir());
+    assert_eq!(
+        db::load_organized(&conn, &crate::modsroot::canonical_key(&mods)).len(),
+        1
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// #423, Windows and macOS: the mod's own link, spelled differently on disk (FS25_Foo.ZIP) after
+// the copies were read, is still its own slot, not another copy.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn undo_organizing_treats_its_own_link_in_another_case_as_its_own() {
+    let base = temp_dir_for("undo_twin_spelling");
+    std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&base);
+    for t in ["FS25_Aaa", "FS25_Foo"] {
+        std::fs::write(
+            base.join(ARCHIVE).join(format!("Vehicles/{t}.zip")),
+            format!("PK {t}"),
+        )
+        .unwrap();
+        organize_row(&conn, &base, t, "Vehicles", false);
+    }
+    let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+    assert!(set_active(&conn, &layout, &on).errors.is_empty());
+    std::fs::rename(base.join("FS25_Foo.zip"), base.join("FS25_Foo.ZIP")).unwrap();
+    let rep = flatten(&conn, &layout);
+    assert!(
+        rep.errors.is_empty() && rep.notices.is_empty(),
+        "{:?} {:?}",
+        rep.errors,
+        rep.notices
+    );
+    assert!(
+        base.join(ARCHIVE)
+            .join("Vehicles/FS25_Foo.zip")
+            .symlink_metadata()
+            .is_err(),
+        "restored"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// #423, Linux: a separate zip whose name differs only in case is another copy, not the mod's slot.
+#[cfg(target_os = "linux")]
+#[test]
+fn undo_organizing_sees_a_case_variant_zip_as_another_copy_on_linux() {
+    let base = temp_dir_for("undo_twin_variant");
+    std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&base);
+    std::fs::write(
+        base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"),
+        b"PK archived",
+    )
+    .unwrap();
+    organize_row(&conn, &base, "FS25_Foo", "Vehicles", false);
+    std::fs::write(base.join("fs25_foo.zip"), b"PK the user's other copy").unwrap();
+    let rep = flatten(&conn, &layout);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.notices.len(), 1, "{:?}", rep.notices);
+    assert!(
+        base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip").is_file(),
+        "left in the library"
+    );
+    assert!(base.join("FS25_Foo.zip").symlink_metadata().is_err());
+    let _ = std::fs::remove_dir_all(&base);
+}
