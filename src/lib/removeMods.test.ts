@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   binName,
+  keepConfirmText,
   removeConfirmText,
   removedText,
   removeVerb,
@@ -90,5 +91,57 @@ describe("removedText", () => {
   it("labels the bin and the button by platform", () => {
     expect(binName(true)).toBe("Recycle Bin");
     expect(removeVerb(false)).toBe("Move to Trash");
+  });
+});
+
+describe("keepConfirmText (#423)", () => {
+  const lib = { fileName: "FS25_Foo.zip", place: "in your library, Vehicles", loose: false, on: false };
+  const folder = { fileName: "FS25_Foo", place: "in your mods folder", on: true };
+
+  it("keeping a parked library copy over the loaded folder says the mod ends up off", () => {
+    expect(keepConfirmText(lib, [folder], true)).toBe(
+      "Keep FS25_Foo.zip (in your library, Vehicles) and remove the other copy, FS25_Foo (in your mods folder)? It goes to the Recycle Bin, so you can restore it from there. Afterwards the mod is off: turn on the copy you kept to use it. If Windows can't put one there, it asks you before deleting it permanently.",
+    );
+  });
+
+  it("keeping the folder says it stays loaded", () => {
+    const keep = { fileName: "FS25_Foo", place: "in your mods folder", loose: true, on: true };
+    const text = keepConfirmText(keep, [{ fileName: "FS25_Foo.zip", place: "in your library, Vehicles", on: false }], false);
+    expect(text).toContain("remove the other copy, FS25_Foo.zip (in your library, Vehicles)?");
+    expect(text).toContain("The copy you keep stays in your mods folder, so the game loads it.");
+    expect(text).toContain("goes to the Trash");
+  });
+
+  it("keeping the loaded library copy says it stays on, even when a loaded folder copy goes", () => {
+    const keep = { fileName: "FS25_Foo.zip", place: "in your library, Vehicles", loose: false, on: true };
+    const text = keepConfirmText(keep, [{ fileName: "FS25_Foo", place: "in your mods folder", on: true }], true);
+    expect(text).toContain("The copy you keep stays on.");
+    expect(text).not.toContain("off");
+  });
+
+  it("keeping one library copy while the one Silo links goes says off, even if both looked on", () => {
+    const keep = { fileName: "FS25_Foo.zip", place: "in your library, Tools", loose: false, on: false };
+    const text = keepConfirmText(keep, [{ fileName: "FS25_Foo.zip", place: "in your library, Vehicles", on: true }], true);
+    expect(text).toContain("Afterwards the mod is off");
+    expect(text).not.toContain("stays on");
+  });
+
+  it("says nothing it can't know when the kept copy's state couldn't be told", () => {
+    const keep = { fileName: "FS25_Foo.zip", place: "in your library, Vehicles", loose: false, on: null };
+    const text = keepConfirmText(keep, [{ fileName: "FS25_Foo.zip", place: "in your library, Tools", on: false }], true);
+    expect(text).toContain("Afterwards, check in the Library whether the mod is on.");
+    expect(text).not.toMatch(/stays (on|parked)/);
+  });
+
+  it("names every copy that goes, and the kept one's state", () => {
+    const two = [
+      { fileName: "FS25_Foo.zip", place: "in your library, Tools", on: false },
+      { fileName: "FS25_Foo.zip", place: "in your library, Maps", on: false },
+    ];
+    const text = keepConfirmText({ ...lib, on: true }, two, true);
+    expect(text).toContain("remove the other copies, FS25_Foo.zip (in your library, Tools), FS25_Foo.zip (in your library, Maps)?");
+    expect(text).toContain("They go to the Recycle Bin");
+    expect(text).toContain("The copy you keep stays on.");
+    expect(keepConfirmText(lib, two, true)).toContain("The copy you keep stays parked.");
   });
 });

@@ -3317,7 +3317,12 @@ async fn adopt_foreign_file(
 
 /// The removal plan the user is being asked to confirm (#429): its id, the mods folder it was
 /// made for, and each planned mod's evidence. One at a time; a new plan replaces it.
-type PendingRemoval = (u64, String, Vec<(organize::Planned, organize::Evidence)>);
+type PendingRemoval = (
+    u64,
+    String,
+    Vec<(organize::Planned, organize::Evidence)>,
+    Option<organize::Keeper>,
+);
 static PENDING_REMOVAL: std::sync::Mutex<Option<PendingRemoval>> = std::sync::Mutex::new(None);
 
 /// Check the mods the Library asks to remove and record what each one is, for the confirmation
@@ -3326,6 +3331,7 @@ static PENDING_REMOVAL: std::sync::Mutex<Option<PendingRemoval>> = std::sync::Mu
 async fn plan_removal(
     app: tauri::AppHandle,
     items: Vec<organize::RemoveRequest>,
+    keep: Option<organize::RemoveRequest>,
 ) -> Result<(u64, organize::RemovalPlan), error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
@@ -3334,10 +3340,17 @@ async fn plan_removal(
         let (layout, key) = active_layout()?;
         let conn = db::open(&db)?;
         let archive_ok = ensure_archive_available().is_ok();
-        let (plan, found) = organize::plan_removal(&conn, &layout, &items, archive_ok);
+        // Keeping one copy (#423): it's checked and recorded too, and nothing may touch it.
+        let keeper = match keep.as_ref().map(|k| organize::keeper(&layout, k)) {
+            Some(Err(why)) => return Err(format!("{why}, so Silo won't remove the others.")),
+            Some(Ok(k)) => Some(k),
+            None => None,
+        };
+        let (plan, found) =
+            organize::plan_removal_keeping(&conn, &layout, &items, keeper.as_ref(), archive_ok);
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *PENDING_REMOVAL.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, key, found));
+        *PENDING_REMOVAL.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, key, found, keeper));
         Ok((id, plan))
     })
     .await
@@ -3362,7 +3375,7 @@ async fn remove_from_library(
         // have started meanwhile); Play waits until it's done.
         let _admitted = admit_removal()?;
         let stale = "That removal is out of date. Choose the mods and remove them again.";
-        let (id, key, planned) = PENDING_REMOVAL
+        let (id, key, planned, keeper) = PENDING_REMOVAL
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
@@ -3373,7 +3386,14 @@ async fn remove_from_library(
         }
         let conn = db::open(&db)?;
         let archive_ok = ensure_archive_available().is_ok();
-        let rep = organize::carry_out(&conn, &layout, &planned, archive_ok, &recycle::move_to_bin);
+        let rep = organize::carry_out(
+            &conn,
+            &layout,
+            &planned,
+            keeper.as_ref(),
+            archive_ok,
+            &recycle::move_to_bin,
+        );
         log::info!(
             "removed {} mod(s) from the library to the Recycle Bin ({} not removed)",
             rep.removed.len(),

@@ -39,6 +39,9 @@ pub struct Planned {
 pub struct RemovalPlan {
     pub items: Vec<Planned>,
     pub refused: Vec<String>,
+    /// Keeping one copy (#423): whether the game loads the kept copy now (it's in the mods
+    /// folder, or it's the copy Silo's link at its name points to). None: it couldn't be told.
+    pub keep_on: Option<bool>,
 }
 
 /// What was true of a planned mod's entry when the user confirmed, compared again before anything
@@ -109,6 +112,153 @@ pub fn plan_removal(
     requests: &[RemoveRequest],
     archive_ok: bool,
 ) -> (RemovalPlan, Vec<(Planned, Evidence)>) {
+    plan_removal_keeping(conn, layout, requests, None, archive_ok)
+}
+
+/// The copy of a mod the user keeps while the others are removed (#423), as it was when they
+/// confirmed: checked again before anything is parked or moved, and never touched.
+#[derive(Debug, Clone)]
+pub struct Keeper {
+    path: PathBuf,
+    roots: Vec<PathBuf>,
+    evidence: Evidence,
+}
+
+/// Check the copy the user keeps (`keep`, the path the Library shows for it): a real file or folder
+/// in the mods folder or directly in a category folder of the archive, and record what it is.
+pub fn keeper(layout: &Layout, keep: &RemoveRequest) -> Result<Keeper, String> {
+    let path = PathBuf::from(&keep.path);
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let roots = if parent == layout.mods {
+        really_at(&path, &layout.mods, None)?;
+        vec![layout.mods.clone()]
+    } else if parent.parent() == Some(layout.archive.as_path()) {
+        really_at(&path, &parent, Some(&layout.archive))?;
+        vec![layout.mods.clone(), layout.archive.clone(), parent]
+    } else {
+        return Err("the copy you're keeping isn't in your mods folder or your library".into());
+    };
+    let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    let evidence = evidence_of(&path, &refs)?;
+    Ok(Keeper {
+        path,
+        roots,
+        evidence,
+    })
+}
+
+/// Whether the game loads the kept copy now: one in the mods folder does; a library copy does when
+/// it's what Silo's link (or copy) at its name in the mods folder is. None when that slot can't be
+/// checked. Told from the files, not from what the Library rows show (two library copies of one
+/// mod can both show as on).
+pub fn keeper_loaded(layout: &Layout, rows: &[OrganizedRow], k: &Keeper) -> Option<bool> {
+    if k.path.parent() == Some(layout.mods.as_path()) {
+        return Some(true);
+    }
+    let name = k.path.file_name()?.to_string_lossy().into_owned();
+    slot_serves(layout, rows, &name, &k.path, k.evidence.kind).ok()
+}
+
+/// Whether the entry at mod slot `name` in the mods folder serves archived copy `copy` (`kind`):
+/// the game loads `copy` through it. Decided by what the slot is first: a link resolves to one
+/// file, and a hardlink is one file, so it serves `copy` exactly when that file is `copy`. Only a
+/// slot that's a separate copy (Silo's projection on another drive or a cloud folder, or a marked
+/// folder copy) can't say which archived copy it came from by itself: then, since Silo only ever
+/// projects a mod's recorded copy, one that matches a recorded copy serves that one, even if
+/// `copy` holds the same bytes; otherwise it's judged against `copy`. `Ok(false)` with no slot;
+/// `Err` when it can't be told.
+fn slot_serves(
+    layout: &Layout,
+    rows: &[OrganizedRow],
+    name: &str,
+    copy: &Path,
+    kind: &str,
+) -> Result<bool, String> {
+    let slot = layout.mods.join(name);
+    let meta = match slot.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+        Ok(m) => m,
+    };
+    let unknown = || "Silo couldn't check which file it is".to_string();
+    // A link (symlink, junction): it serves the one file it resolves to.
+    if meta.file_type().is_symlink() {
+        let to = std::fs::canonicalize(&slot).map_err(|e| e.to_string())?;
+        let copy = std::fs::canonicalize(copy).map_err(|e| e.to_string())?;
+        return Ok(to == copy);
+    }
+    // A file that is an archived copy under another name (a hardlink): that copy, whichever
+    // category it's in, recorded or not.
+    if meta.is_file() {
+        let here = crate::scratch::entry_number(&slot).ok_or_else(unknown)?;
+        let target = crate::scratch::entry_number(copy).ok_or_else(unknown)?;
+        if here == target {
+            return Ok(true);
+        }
+        let categories = std::fs::read_dir(&layout.archive).map_err(|e| e.to_string())?;
+        for cat in categories {
+            let archived = cat.map_err(|e| e.to_string())?.path().join(name);
+            if archived.symlink_metadata().is_ok_and(|m| m.is_file())
+                && crate::scratch::entry_number(&archived) == Some(here)
+            {
+                return Ok(false); // a hardlink of another archived copy, which isn't `copy`
+            }
+        }
+    }
+    // A separate copy: the recorded copy's projection serves the recorded copy.
+    let target = crate::scratch::entry_number(copy).ok_or_else(unknown)?;
+    for row in rows
+        .iter()
+        .filter(|r| r.file_name.eq_ignore_ascii_case(name))
+    {
+        let recorded = archive_path(&layout.archive, &row.category, &row.file_name);
+        if projection_verdict(&slot, &recorded, &row.kind).map_err(|e| e.to_string())? {
+            return Ok(crate::scratch::entry_number(&recorded).ok_or_else(unknown)? == target);
+        }
+    }
+    projection_verdict(&slot, copy, kind).map_err(|e| e.to_string())
+}
+
+/// The kept copy is still what it was when the user confirmed.
+fn keeper_unchanged(k: &Keeper) -> bool {
+    let refs: Vec<&Path> = k.roots.iter().map(PathBuf::as_path).collect();
+    evidence_of(&k.path, &refs).is_ok_and(|now| now == k.evidence)
+}
+
+/// Why removing `planned` (with its evidence and library row, if any) would touch the kept copy:
+/// it is that copy, the same file under another name, or the library mod whose link in the mods
+/// folder the kept copy is.
+fn touches_keeper(
+    layout: &Layout,
+    k: &Keeper,
+    planned: &Planned,
+    evidence: &Evidence,
+    row: Option<&OrganizedRow>,
+) -> Option<String> {
+    if Path::new(&planned.path) == k.path {
+        return Some("that's the copy you're keeping".into());
+    }
+    if evidence.entry.is_some() && evidence.entry == k.evidence.entry {
+        return Some("it's the same file as the copy you're keeping".into());
+    }
+    let keeps_slot = row.is_some_and(|r| {
+        k.path.parent() == Some(layout.mods.as_path())
+            && k.path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&r.file_name))
+    });
+    keeps_slot.then(|| "the copy you're keeping is Silo's link to it in your mods folder".into())
+}
+
+/// [`plan_removal`] keeping `keep` (#423): a request that is the kept copy, or would touch it, is
+/// refused.
+pub fn plan_removal_keeping(
+    conn: &Connection,
+    layout: &Layout,
+    requests: &[RemoveRequest],
+    keep: Option<&Keeper>,
+    archive_ok: bool,
+) -> (RemovalPlan, Vec<(Planned, Evidence)>) {
     let key = crate::modsroot::canonical_key(&layout.mods);
     let mut plan = RemovalPlan::default();
     let mut found = Vec::new();
@@ -126,7 +276,14 @@ pub fn plan_removal(
     };
     let mut seen = HashSet::new();
     for r in requests.iter().filter(|r| seen.insert(r.path.clone())) {
-        match check(layout, &rows, r, archive_ok) {
+        let checked = check(layout, &rows, r, archive_ok).and_then(|(planned, evidence)| {
+            let row = library_row(layout, &rows, r);
+            match keep.and_then(|k| touches_keeper(layout, k, &planned, &evidence, row)) {
+                Some(why) => Err(format!("{why}, so Silo left it.")),
+                None => Ok((planned, evidence)),
+            }
+        });
+        match checked {
             Ok(pair) => {
                 plan.items.push(pair.0.clone());
                 found.push(pair);
@@ -134,6 +291,7 @@ pub fn plan_removal(
             Err(why) => plan.refused.push(format!("{}: {why}", r.tech_name)),
         }
     }
+    plan.keep_on = keep.and_then(|k| keeper_loaded(layout, &rows, k));
     (plan, found)
 }
 
@@ -148,6 +306,7 @@ pub fn carry_out(
     conn: &Connection,
     layout: &Layout,
     planned: &[(Planned, Evidence)],
+    keep: Option<&Keeper>,
     archive_ok: bool,
     bin: &dyn Fn(&Path) -> Binned,
 ) -> RemoveReport {
@@ -166,21 +325,37 @@ pub fn carry_out(
         }
     };
 
+    // The copy the user keeps must still be the one they confirmed, or nothing goes (#423).
+    if keep.is_some_and(|k| !keeper_unchanged(k)) {
+        for (p, _) in planned {
+            rep.errors.push(format!(
+                "{}: the copy you're keeping changed since you confirmed, so Silo removed nothing. Try again.",
+                p.tech_name
+            ));
+        }
+        return rep;
+    }
+
     // Everything again, against what was confirmed: one that changed isn't parked either.
-    let still_confirmed = |p: &Planned, confirmed: &Evidence| -> Result<(), String> {
+    // `parked`: after this pass parked it, `on` is false by design, so only the rest must match.
+    let still_confirmed = |p: &Planned, confirmed: &Evidence, parked: bool| -> Result<(), String> {
         let request = RemoveRequest {
             tech_name: p.tech_name.clone(),
             path: p.path.clone(),
         };
+        let expected = Planned {
+            on: p.on && !parked,
+            ..p.clone()
+        };
         match check(layout, &rows, &request, archive_ok) {
-            Ok((now, evidence)) if now == *p && evidence == *confirmed => Ok(()),
+            Ok((now, evidence)) if now == expected && evidence == *confirmed => Ok(()),
             Ok(_) => Err("it changed since you confirmed, so Silo left it. Try again to remove it as it is now.".into()),
             Err(why) => Err(why),
         }
     };
     let mut ready: Vec<(&Planned, &Evidence, Option<OrganizedRow>, PathBuf)> = Vec::new();
     for (p, confirmed) in planned {
-        match still_confirmed(p, confirmed) {
+        match still_confirmed(p, confirmed, false) {
             Ok(()) => {
                 let request = RemoveRequest {
                     tech_name: p.tech_name.clone(),
@@ -193,38 +368,49 @@ pub fn carry_out(
         }
     }
 
+    // Only the ones whose own copy is what the game loads now (`Planned::on`, checked again
+    // above): never park a name whose entry is another copy.
     let leaving: HashSet<&str> = ready
         .iter()
-        .filter_map(|(_, _, row, _)| {
-            row.as_ref()
-                .filter(|r| r.active)
-                .map(|r| r.tech_name.as_str())
-        })
+        .filter(|(p, _, row, _)| p.on && row.is_some())
+        .map(|(p, _, _, _)| p.tech_name.as_str())
         .collect();
+    // Park exactly those, one by one, each checked at that moment: never a pass over the whole
+    // library, which would reconcile other names too (#423: another copy's entry among them).
     let mut park_errors: Vec<String> = Vec::new();
-    if !leaving.is_empty() {
-        let keep: HashSet<String> = rows
-            .iter()
-            .filter(|r| r.active && !leaving.contains(r.tech_name.as_str()))
-            .map(|r| r.tech_name.clone())
-            .collect();
-        let parked = set_active(conn, layout, &keep);
-        park_errors = parked.errors;
-        // Where parking kept an edited folder copy: the user needs to know before its original goes.
-        rep.notices.extend(parked.notices);
+    for (_, _, row, _) in ready
+        .iter()
+        .filter(|(p, _, _, _)| leaving.contains(p.tech_name.as_str()))
+    {
+        let Some(row) = row else { continue };
+        match park_one(conn, layout, &key, &rows, row) {
+            // Where parking kept an edited folder copy: the user needs to know before its original goes.
+            Ok(Some(kept)) => rep
+                .notices
+                .push(kept_copy_notice(&row.file_name, &kept, false)),
+            Ok(None) => {}
+            Err(e) => park_errors.push(format!("{}: {e}", row.tech_name)),
+        }
     }
 
     for (p, confirmed, row, path) in ready {
         let name = p.tech_name.as_str();
         if let Some(row) = &row {
-            if let Err(why) = slot_clear(layout, row, &park_errors) {
+            if let Err(why) = slot_clear(layout, &rows, row, &park_errors) {
                 rep.errors.push(format!("{name}: {why}"));
                 continue;
             }
         }
         // Once more right before it moves: parking, or moving the ones before it, took a while.
-        if let Err(why) = still_confirmed(p, confirmed) {
+        if let Err(why) = still_confirmed(p, confirmed, p.on && row.is_some()) {
             rep.errors.push(format!("{name}: {why}"));
+            continue;
+        }
+        if keep.is_some_and(|k| !keeper_unchanged(k)) {
+            // Partway through: what's already gone stays gone (it's in `removed`); the rest stays.
+            rep.errors.push(format!(
+                "{name}: the copy you're keeping changed partway through, so Silo stopped and left this one. Try again."
+            ));
             continue;
         }
         let gone = match bin(&path) {
@@ -296,14 +482,115 @@ fn check(
     r: &RemoveRequest,
     archive_ok: bool,
 ) -> Result<(Planned, Evidence), String> {
+    let given = Path::new(&r.path);
     match library_row(layout, rows, r) {
-        Some(row) => check_library(layout, row, r, archive_ok),
+        Some(row) => check_library(layout, rows, row, r, archive_ok),
+        // In a category folder of the archive, with no row of its own: a second copy (#423).
+        None if given.parent().and_then(Path::parent) == Some(layout.archive.as_path()) => {
+            check_archived_copy(layout, rows, r, archive_ok)
+        }
         None => check_loose(layout, rows, r),
     }
 }
 
+/// Whether the entry `name` (`meta` its own metadata) is mod `tech` itself: a zip named after it,
+/// or a folder of that name holding `modDesc.xml`.
+fn is_the_mod(path: &Path, name: &str, meta: &std::fs::Metadata, tech: &str) -> bool {
+    if meta.is_dir() {
+        name.eq_ignore_ascii_case(tech) && path.join("modDesc.xml").is_file()
+    } else {
+        name.len() > 4
+            && name[name.len() - 4..].eq_ignore_ascii_case(".zip")
+            && name[..name.len() - 4].eq_ignore_ascii_case(tech)
+    }
+}
+
+/// A second archived copy of a mod, with no library row of its own (#423: two copies of one mod
+/// in the library, only one of them recorded): the named mod itself, really in a category folder
+/// of the archive (not a link, the category folder not a link, the default archive not a link),
+/// and no row's archived copy. It isn't loaded, so nothing is parked.
+fn check_archived_copy(
+    layout: &Layout,
+    rows: &[OrganizedRow],
+    r: &RemoveRequest,
+    archive_ok: bool,
+) -> Result<(Planned, Evidence), String> {
+    if !archive_ok {
+        return Err("your library archive isn't reachable, so Silo won't remove it.".into());
+    }
+    if layout.archive_is_default() && is_link(&layout.archive) != Some(false) {
+        return Err(
+            "your library archive folder is a link or can't be read, so Silo won't remove it."
+                .into(),
+        );
+    }
+    let path = PathBuf::from(&r.path);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::paths::safe_file_name(&name)?;
+    if rows
+        .iter()
+        .any(|row| archive_path(&layout.archive, &row.category, &row.file_name) == path)
+    {
+        return Err(format!(
+            "{name} is another mod's copy in your library, so Silo left it alone."
+        ));
+    }
+    let meta = path
+        .symlink_metadata()
+        .map_err(|_| format!("{name} is no longer there."))?;
+    if meta.file_type().is_symlink() || !is_the_mod(&path, &name, &meta, &r.tech_name) {
+        return Err(format!("{name} isn't that mod, so Silo left it alone."));
+    }
+    let category = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    really_at(&path, &category, Some(&layout.archive))?;
+    // A recorded copy under another spelling (`vehicles` for `Vehicles`) is that row's, never a
+    // second copy: compared by which file it is, not by how the path is written.
+    let here = crate::scratch::entry_number(&path)
+        .ok_or_else(|| format!("Silo couldn't check which file {name} is, so it left it alone."))?;
+    for row in rows {
+        let recorded = archive_path(&layout.archive, &row.category, &row.file_name);
+        if crate::scratch::entry_number(&recorded) == Some(here) {
+            return Err(format!(
+                "{name} is the copy recorded in your library, so Silo left it. Remove it from its own entry."
+            ));
+        }
+    }
+    // The game may load this copy through the entry at its name: then it isn't the spare one.
+    // A slot that's the recorded copy's projection serves the recorded copy, even if this one
+    // holds the same bytes.
+    match slot_serves(layout, rows, &name, &path, if meta.is_dir() { "dir" } else { "zip" }) {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(
+                "the game loads this copy, through the entry at its name in your mods folder, so Silo left it. Keep this one, or park the mod first."
+                    .into(),
+            )
+        }
+        Err(e) => {
+            return Err(format!(
+                "Silo couldn't check whether the game loads {name} ({e}), so it left it alone."
+            ))
+        }
+    }
+    let evidence = evidence_of(&path, &[&layout.mods, &layout.archive, &category])?;
+    Ok((
+        Planned {
+            tech_name: r.tech_name.clone(),
+            path: r.path.clone(),
+            file_name: name,
+            kind: evidence.kind.into(),
+            on: false,
+        },
+        evidence,
+    ))
+}
+
 fn check_library(
     layout: &Layout,
+    rows: &[OrganizedRow],
     row: &OrganizedRow,
     r: &RemoveRequest,
     archive_ok: bool,
@@ -327,6 +614,15 @@ fn check_library(
             row.file_name
         ));
     }
+    // It's on (and parked first) only if the entry at its name really serves it: another copy of
+    // the mod may be the one there (#423), and parking must never take that one.
+    let on = row.active
+        && slot_serves(layout, rows, &row.file_name, &src, &row.kind).map_err(|e| {
+            format!(
+                "Silo couldn't check whether the game loads {} ({e}), so it left it.",
+                row.file_name
+            )
+        })?;
     Ok((
         Planned {
             tech_name: row.tech_name.clone(),
@@ -334,7 +630,7 @@ fn check_library(
             path: r.path.clone(),
             file_name: row.file_name.clone(),
             kind: row.kind.clone(),
-            on: row.active,
+            on,
         },
         evidence,
     ))
@@ -369,14 +665,7 @@ fn check_loose(
         ));
     }
     let kind = if meta.is_dir() { "dir" } else { "zip" };
-    let is_it = if meta.is_dir() {
-        name.eq_ignore_ascii_case(&r.tech_name) && path.join("modDesc.xml").is_file()
-    } else {
-        name.len() > 4
-            && name[name.len() - 4..].eq_ignore_ascii_case(".zip")
-            && name[..name.len() - 4].eq_ignore_ascii_case(&r.tech_name)
-    };
-    if !is_it {
+    if !is_the_mod(&path, &name, &meta, &r.tech_name) {
         return Err(format!("{name} isn't that mod, so Silo left it alone."));
     }
     really_at(&path, &layout.mods, None)?;
@@ -412,10 +701,37 @@ fn check_loose(
     ))
 }
 
+/// Park library mod `row` alone: take away the entry at its name only while it still serves the
+/// recorded copy (identity first, see [`slot_serves`]); one that serves anything else is left as
+/// it is. Its flag and projection record follow. Returns where an edited folder copy was kept.
+fn park_one(
+    conn: &Connection,
+    layout: &Layout,
+    key: &str,
+    rows: &[OrganizedRow],
+    row: &OrganizedRow,
+) -> Result<Option<PathBuf>, String> {
+    let src = archive_path(&layout.archive, &row.category, &row.file_name);
+    let link = layout.mods.join(&row.file_name);
+    let kept = if slot_serves(layout, rows, &row.file_name, &src, &row.kind)? {
+        clear_projection(&link, &src, &layout.mods).map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+    db::forget_projection(conn, key, &row.file_name);
+    db::set_organized_active(conn, key, &row.tech_name, false)?;
+    Ok(kept)
+}
+
 /// After parking: nothing of Silo's is left at library mod `row`'s name. Parking reported no
 /// problem for it, and the slot is empty, or holds the user's own file (not part of this library
 /// entry). A slot Silo can't inspect refuses.
-fn slot_clear(layout: &Layout, row: &OrganizedRow, park_errors: &[String]) -> Result<(), String> {
+fn slot_clear(
+    layout: &Layout,
+    rows: &[OrganizedRow],
+    row: &OrganizedRow,
+    park_errors: &[String],
+) -> Result<(), String> {
     let prefix = format!("{}: ", row.tech_name);
     if let Some(e) = park_errors.iter().find(|e| e.starts_with(&prefix)) {
         return Err(format!("{} It wasn't removed.", &e[prefix.len()..]));
@@ -428,7 +744,8 @@ fn slot_clear(layout: &Layout, row: &OrganizedRow, park_errors: &[String]) -> Re
             "Silo couldn't check {} in your mods folder ({e}), so it wasn't removed.",
             row.file_name
         )),
-        Ok(_) => match projection_verdict(&link, &src, &row.kind) {
+        // By what the entry serves, identity first: another copy there is left as it is.
+        Ok(_) => match slot_serves(layout, rows, &row.file_name, &src, &row.kind) {
             Ok(false) => Ok(()),
             Ok(true) => Err("Silo couldn't park it first, so it wasn't removed.".into()),
             Err(e) => Err(format!(
