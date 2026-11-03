@@ -222,6 +222,21 @@ pub fn root_tech_names(root: &Path) -> HashSet<String> {
         .collect()
 }
 
+/// [`root_tech_names`] with the entry name (file or folder, as spelled on disk) of each copy, so a
+/// caller can tell another copy of a tech name from the one at a given name. Keyed by the tech
+/// name in ASCII lower case: `FS25_Foo.zip` and an `fs25_foo` folder are copies of one mod.
+pub fn root_entries_by_tech(root: &Path) -> std::collections::HashMap<String, HashSet<String>> {
+    let mut out: std::collections::HashMap<String, HashSet<String>> = Default::default();
+    for c in collect_root_candidates(root) {
+        if let Some(name) = c.path.file_name() {
+            out.entry(c.tech_name.to_ascii_lowercase())
+                .or_default()
+                .insert(name.to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
 /// Mods parked in an archive folder's `<Category>/` subfolders (Silo-managed, one level of folders).
 fn collect_archive_candidates(archive: &Path) -> Vec<Candidate> {
     let mut out = Vec::new();

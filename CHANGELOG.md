@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Undo organizing** no longer puts a mod's zip back into your mods folder next to another copy
+  of the same mod (an unzipped folder of it, say), where the game would load one of the two. The
+  zip stays in your library, parked, and Silo says which copy is in the way, the same way turning
+  it on already refuses. Undo organizing also turns off **Auto-file new mods** (and says so first),
+  which otherwise filed every mod straight back into the library on the next scan. (#423)
 - The installed app no longer blocks its own connection to Silo's core, so every action takes the
   quick route instead of a slower fallback, and the developer console no longer fills with
   security-policy errors that could hide real ones. (#425)
