@@ -147,7 +147,8 @@ archive validity — so confirm that path degrades to the validity check, not a 
 1. Organize a mod → deactivate it (parked).
 2. Drop a **different** ZIP at the same filename in the flat `mods/` folder.
 3. Activate → park → Undo organizing → Re-read every mod → switch mod sets.
-4. **Silo must not lose the user replacement**, and when it leaves a file alone it says so.
+4. **Silo must not lose the user replacement.** If it moves it to `mods/backups`, it must say
+   where. (It doesn't always say why it left a file in place; preservation is what's tested.)
 
 Repeat across these identity branches:
 - Same size, different bytes · different bytes placed while the mod is active, keeping the
@@ -156,8 +157,14 @@ Repeat across these identity branches:
   `.silo-projection` marker, unchanged and with a file edited · a link left dangling (its target
   gone) · the archived copy missing, replaced by a link, or changed.
 
-Forensic-diff after each step, against the Phase 0 baseline. **The rule is about content, not
-names: no bytes may disappear unless the same bytes still exist elsewhere, unchanged.**
+**Snapshot each fixture before each step:** after you've prepared it and before you run the
+step, hash every file under `mods/` (archive included) by relative path, plus the target of
+every link and where it resolves, even outside the archive. Phase 0 alone doesn't cover bytes
+you put there afterwards. Forensic-diff after the step against that snapshot. **The rule is about
+user content, not names: no file's bytes may disappear unless the same bytes still exist,
+readable, at a path you can name.** A survivor you can't read or can't find doesn't count. The
+one exception is Silo's own `.silo-projection` marker file, which it may remove from a folder copy
+it moves to `mods/backups`.
 - **Anything Silo can't prove is its own** (different bytes, a folder without the marker, a link
   that resolves somewhere else) must still exist byte for byte: in place, or moved to
   `mods/backups` with a notice saying where.
