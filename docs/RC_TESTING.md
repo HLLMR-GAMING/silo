@@ -147,13 +147,22 @@ archive validity — so confirm that path degrades to the validity check, not a 
 1. Organize a mod → deactivate it (parked).
 2. Drop a **different** ZIP at the same filename in the flat `mods/` folder.
 3. Activate → park → Undo organizing → Re-read every mod → switch mod sets.
-4. **Silo must refuse to delete the user replacement** (reports "isn't the one Silo projected").
+4. **Silo must refuse to delete the user replacement** (reports "isn't the one Silo linked" or
+   "isn't Silo's copy of this mod").
 
 Repeat across every identity branch the code checks:
 - Same size, different bytes · exact byte-identical copy · hardlink · symlink/junction · folder
   mod · copied directory **with** and **without** the `.silo-projection` marker.
 
-Forensic-diff after each — the user's file must survive every branch.
+Forensic-diff after each. Expected per branch:
+- **Different bytes** (same size or not), a folder without the marker, a link that resolves
+  somewhere else: the user's file must survive every step.
+- **Exact byte-identical copy**, a hardlink of the archived file, a link that resolves to it, a
+  copied directory **with** the marker whose files haven't changed: Silo treats these as its own
+  projection and may remove them when parking, because the archive holds the same bytes. That is by design: copy-mode
+  projections (another drive, exFAT, cloud-synced folders) are exactly such copies. Pass if the
+  archived copy is still there, byte-identical, afterwards. Nothing may be removed when the
+  archived copy is missing or differs (#399).
 
 ### E. Degraded network
 
