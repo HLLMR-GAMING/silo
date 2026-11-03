@@ -55,6 +55,8 @@
 
   // Thumbnails: SiloAPI-cached URLs load directly; GitHub ones come through the Rust proxy.
   let thumb = $state("");
+  /** The thumbnail element shown now: an error from an earlier one (a previous mod's) is ignored. */
+  let thumbEl = $state<HTMLImageElement | null>(null);
   $effect(() => {
     const url = m.imageUrl;
     thumb = "";
@@ -79,7 +81,9 @@
 <div class="card" {onclick}>
   <div class="thumb">
     {#if thumb}
-      <img src={thumb} alt="" loading="lazy" />
+      <!-- Image host unreachable: the letter placeholder, not a broken-image icon (#428). -->
+      <img src={thumb} alt="" loading="lazy" bind:this={thumbEl}
+        onerror={(e) => e.currentTarget === thumbEl && (thumb = "")} />
     {:else}
       <div class="thumb-fallback" aria-hidden="true">{(m.title || "?").slice(0, 1)}</div>
     {/if}

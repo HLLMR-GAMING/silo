@@ -14,6 +14,8 @@
   const uid = $props.id();
   let showFull = $state(false);
   let cover = $state("");
+  /** The cover element shown now: an error from an earlier one (a previous mod's) is ignored. */
+  let coverEl = $state<HTMLImageElement | null>(null);
   $effect(() => {
     const url = catalog?.imageUrl;
     cover = "";
@@ -33,7 +35,8 @@
 {#if catalog && (cover || summary || catalog.sources?.length)}
   <section class="sec" aria-labelledby="{uid}-about">
     <h3 id="{uid}-about" class="h">About</h3>
-    {#if cover}<img class="cover" src={cover} alt="" />{/if}
+    {#if cover}<img class="cover" src={cover} alt="" bind:this={coverEl}
+        onerror={(e) => e.currentTarget === coverEl && (cover = "")} />{/if}
     {#if summary}
       <p class="summary">{summary}</p>
       {#if hasMore}
