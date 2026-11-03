@@ -151,17 +151,50 @@ pub fn keeper(layout: &Layout, keep: &RemoveRequest) -> Result<Keeper, String> {
 /// it's what Silo's link (or copy) at its name in the mods folder is. None when that slot can't be
 /// checked. Told from the files, not from what the Library rows show (two library copies of one
 /// mod can both show as on).
-pub fn keeper_loaded(layout: &Layout, k: &Keeper) -> Option<bool> {
+pub fn keeper_loaded(layout: &Layout, rows: &[OrganizedRow], k: &Keeper) -> Option<bool> {
     if k.path.parent() == Some(layout.mods.as_path()) {
         return Some(true);
     }
-    let name = k.path.file_name()?;
+    let name = k.path.file_name()?.to_string_lossy().into_owned();
+    slot_serves(layout, rows, &name, &k.path, k.evidence.kind).ok()
+}
+
+/// Whether the entry at mod slot `name` in the mods folder serves archived copy `copy` (`kind`):
+/// the game loads `copy` through it. Silo only ever links a mod's recorded copy, so a slot that is
+/// Silo's projection of a recorded copy serves that one, even when another archived copy holds the
+/// same bytes; only a slot that's no recorded copy's projection is judged against `copy` itself.
+/// `Ok(false)` with no slot; `Err` when it can't be told.
+fn slot_serves(
+    layout: &Layout,
+    rows: &[OrganizedRow],
+    name: &str,
+    copy: &Path,
+    kind: &str,
+) -> Result<bool, String> {
     let slot = layout.mods.join(name);
     match slot.symlink_metadata() {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
-        Err(_) => None,
-        Ok(_) => projection_verdict(&slot, &k.path, k.evidence.kind).ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+        Ok(_) => {}
     }
+    for row in rows
+        .iter()
+        .filter(|r| r.file_name.eq_ignore_ascii_case(name))
+    {
+        let recorded = archive_path(&layout.archive, &row.category, &row.file_name);
+        if projection_verdict(&slot, &recorded, &row.kind).map_err(|e| e.to_string())? {
+            // The recorded copy's projection: it serves that copy (which may be `copy` itself).
+            let same = match (
+                crate::scratch::entry_number(&recorded),
+                crate::scratch::entry_number(copy),
+            ) {
+                (Some(a), Some(b)) => a == b,
+                _ => return Err("Silo couldn't check which file it is".into()),
+            };
+            return Ok(same);
+        }
+    }
+    projection_verdict(&slot, copy, kind).map_err(|e| e.to_string())
 }
 
 /// The kept copy is still what it was when the user confirmed.
@@ -236,7 +269,7 @@ pub fn plan_removal_keeping(
             Err(why) => plan.refused.push(format!("{}: {why}", r.tech_name)),
         }
     }
-    plan.keep_on = keep.and_then(|k| keeper_loaded(layout, k));
+    plan.keep_on = keep.and_then(|k| keeper_loaded(layout, &rows, k));
     (plan, found)
 }
 
@@ -494,28 +527,22 @@ fn check_archived_copy(
             ));
         }
     }
-    // The game may load this copy through Silo's link at its name: then it isn't the spare one.
-    let slot = layout.mods.join(&name);
-    match slot.symlink_metadata() {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+    // The game may load this copy through the entry at its name: then it isn't the spare one.
+    // A slot that's the recorded copy's projection serves the recorded copy, even if this one
+    // holds the same bytes.
+    match slot_serves(layout, rows, &name, &path, if meta.is_dir() { "dir" } else { "zip" }) {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(
+                "the game loads this copy, through the entry at its name in your mods folder, so Silo left it. Keep this one, or park the mod first."
+                    .into(),
+            )
+        }
         Err(e) => {
             return Err(format!(
-                "Silo couldn't check {name} in your mods folder ({e}), so it left it alone."
+                "Silo couldn't check whether the game loads {name} ({e}), so it left it alone."
             ))
         }
-        Ok(_) => match projection_verdict(&slot, &path, if meta.is_dir() { "dir" } else { "zip" }) {
-            Ok(false) => {}
-            Ok(true) => {
-                return Err(
-                    "the game loads this copy, through Silo's link in your mods folder, so Silo left it. Keep this one, or park the mod first."
-                .into())
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Silo couldn't check whether the game loads {name} ({e}), so it left it alone."
-                ))
-            }
-        },
     }
     let evidence = evidence_of(&path, &[&layout.mods, &layout.archive, &category])?;
     Ok((

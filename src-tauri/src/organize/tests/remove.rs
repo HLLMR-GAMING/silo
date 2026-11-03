@@ -911,3 +911,48 @@ fn the_plan_tells_whether_the_kept_copy_is_loaded_in_both_directions() {
     assert!(plan.items[0].on, "it's parked first");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn byte_identical_library_copies_tell_the_linked_one_from_the_spare() {
+    // The recorded copy (Vehicles) is linked into the mods folder; the second copy (Tools) holds
+    // the very same bytes. Keeping the recorded one removes the spare and leaves the link.
+    let (base, conn, layout, recorded) = library_with_foo("rm_twin_bytes", true);
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let spare = tools.join("FS25_Foo.zip");
+    std::fs::copy(&recorded, &spare).unwrap();
+    let link = layout.mods.join("FS25_Foo.zip");
+    let k = keeper(&layout, &req("FS25_Foo", &recorded)).unwrap();
+    let (plan, found) =
+        plan_removal_keeping(&conn, &layout, &[req("FS25_Foo", &spare)], Some(&k), true);
+    assert_eq!(found.len(), 1, "{:?}", plan.refused);
+    assert_eq!(plan.keep_on, Some(true), "the kept copy is the linked one");
+    let bin = base.join("bin");
+    let rep = carry_out(&conn, &layout, &found, Some(&k), true, &bin_at(&bin));
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert!(
+        recorded.is_file() && link.exists(),
+        "the kept copy and its link stay"
+    );
+    assert!(bin.join("FS25_Foo.zip").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+
+    // The other way: keep the spare, remove the recorded copy. The spare isn't what's linked.
+    let (base, conn, layout, recorded) = library_with_foo("rm_twin_bytes_inverse", true);
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let spare = tools.join("FS25_Foo.zip");
+    std::fs::copy(&recorded, &spare).unwrap();
+    let k = keeper(&layout, &req("FS25_Foo", &spare)).unwrap();
+    let (plan, found) = plan_removal_keeping(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &recorded)],
+        Some(&k),
+        true,
+    );
+    assert_eq!(found.len(), 1, "{:?}", plan.refused);
+    assert_eq!(plan.keep_on, Some(false), "the spare isn't what Silo links");
+    assert!(plan.items[0].on, "the recorded copy is parked first");
+    let _ = std::fs::remove_dir_all(&base);
+}
