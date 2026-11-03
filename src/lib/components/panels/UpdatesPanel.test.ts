@@ -134,6 +134,7 @@ describe("UpdatesPanel", () => {
       kind: "zip",
       flatVersion: "1.0.2.0",
       managedVersion: "1.0.0.0",
+      archiveChanged: false,
     };
     const h = setup({ modhub: [hub] }, { foreign: [file] });
     expect(screen.getByText(/Found 1.0.2.0 in your mods folder/)).toBeInTheDocument();

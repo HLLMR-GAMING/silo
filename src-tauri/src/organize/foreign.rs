@@ -63,6 +63,9 @@ pub struct ForeignFile {
     pub flat_version: Option<String>,
     /// Version of Silo's managed/archived copy (what "restore" would put back).
     pub managed_version: Option<String>,
+    /// The entry is the one Silo linked; it's the copy in the library archive that changed since
+    /// (#431). The choices are the same: keep the mods-folder copy, or put the library's in.
+    pub archive_changed: bool,
 }
 
 /// Best-effort mod version from a mod's `modDesc.xml`, for showing which build is which.
@@ -99,18 +102,42 @@ pub fn detect_foreign_projections(conn: &Connection, layout: &Layout) -> Vec<For
             continue; // no archived copy to compare against (or to restore)
         }
         let kind = row.kind.as_str();
-        // Fast path: provenance match → provably ours, no hash. Else the careful check (which
-        // hashes a copy). Either way, (re)record provenance for a confirmed zip so the next scan
-        // — and any deactivate — is O(1) instead of re-hashing gigabytes.
-        if matches_provenance(conn, &key, &link, &row.file_name)
-            || is_silo_projection(&link, &src, kind)
-        {
+        // Fast path: provenance match → the entry is the one Silo linked, no hash. Then, for a zip,
+        // the archived copy must still be the one it was linked from (#431): a library copy whose
+        // size or time changed since is hashed against the entry, and differs → reported. Else
+        // the careful check (which hashes a copy). Either way, (re)record provenance (with the
+        // archived copy's stamp) for a confirmed zip so the next scan, and any deactivate, is
+        // O(1) instead of re-hashing gigabytes; and note an entry that isn't Silo's copy so the
+        // scan shows that file (#436).
+        let linked = matches_provenance(conn, &key, &link, &row.file_name);
+        let archive_changed = linked
+            && kind == "zip"
+            && db::projection_src_stats(conn, &key, &row.file_name)
+                .is_some_and(|was| file_stats(&src) != Some(was));
+        let ours = if linked && !archive_changed {
+            true
+        } else {
+            is_silo_projection(&link, &src, kind)
+        };
+        if ours {
             if kind == "zip" {
                 if let Some((size, mtime)) = file_stats(&link) {
-                    db::record_projection(conn, &key, &row.file_name, size, mtime);
+                    db::record_projection(
+                        conn,
+                        &key,
+                        &row.file_name,
+                        size,
+                        mtime,
+                        file_stats(&src),
+                    );
                 }
             }
             continue;
+        }
+        if kind == "zip" {
+            if let Some((size, mtime)) = file_stats(&link) {
+                db::mark_foreign(conn, &key, &row.file_name, size, mtime);
+            }
         }
         out.push(ForeignFile {
             flat_version: mod_version(&link, kind),
@@ -118,6 +145,7 @@ pub fn detect_foreign_projections(conn: &Connection, layout: &Layout) -> Vec<For
             tech_name: row.tech_name,
             file_name: row.file_name,
             kind: row.kind,
+            archive_changed: linked,
         });
     }
     out

@@ -18,6 +18,8 @@
     kind: string;
     flatVersion: string | null;
     managedVersion: string | null;
+    /** The library's copy changed since Silo put the mods-folder one there (#431). */
+    archiveChanged?: boolean;
   }
 
   interface Props {
@@ -196,21 +198,40 @@
         <li class="hz-row">
           <div class="hz-name"><code>{f.fileName}</code></div>
           <p class="hz-detail">
-            The file in your mods folder ({ver(f.flatVersion)}) isn't the one Silo keeps ({ver(f.managedVersion)}). Pick
-            which build to keep. The other is moved to a backup folder, so nothing is lost.
+            {#if f.archiveChanged}
+              The copy in your library changed ({ver(f.managedVersion)}) since Silo put {ver(f.flatVersion)} in your mods
+              folder. Pick which build to keep. The other is moved to a backup folder, so nothing is lost.
+            {:else}
+              The file in your mods folder ({ver(f.flatVersion)}) isn't the one Silo keeps ({ver(f.managedVersion)}). Pick
+              which build to keep. The other is moved to a backup folder, so nothing is lost.
+            {/if}
           </p>
           <div class="hz-actions">
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={pendingFile === f.fileName || !!lockReason}
-              onclick={() => resolve(f.fileName, "adopt")}
-            >
-              Use this version
-            </Button>
-            <Button size="sm" disabled={pendingFile === f.fileName || !!lockReason} onclick={() => resolve(f.fileName, "restore")}>
-              Keep Silo's copy
-            </Button>
+            {#if f.archiveChanged}
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={pendingFile === f.fileName || !!lockReason}
+                onclick={() => resolve(f.fileName, "restore")}
+              >
+                Use the library's copy
+              </Button>
+              <Button size="sm" disabled={pendingFile === f.fileName || !!lockReason} onclick={() => resolve(f.fileName, "adopt")}>
+                Keep the mods-folder copy
+              </Button>
+            {:else}
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={pendingFile === f.fileName || !!lockReason}
+                onclick={() => resolve(f.fileName, "adopt")}
+              >
+                Use this version
+              </Button>
+              <Button size="sm" disabled={pendingFile === f.fileName || !!lockReason} onclick={() => resolve(f.fileName, "restore")}>
+                Keep Silo's copy
+              </Button>
+            {/if}
           </div>
         </li>
       {/each}

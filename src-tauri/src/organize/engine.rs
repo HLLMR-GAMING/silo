@@ -225,7 +225,14 @@ pub fn set_active_touched(
                     // identified structurally (junction / marker), cheaply.
                     if row.kind == "zip" {
                         if let Some((size, mtime)) = file_stats(&link) {
-                            db::record_projection(conn, &key, &row.file_name, size, mtime);
+                            db::record_projection(
+                                conn,
+                                &key,
+                                &row.file_name,
+                                size,
+                                mtime,
+                                file_stats(&src),
+                            );
                         }
                     }
                     if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, true) {
@@ -289,7 +296,7 @@ pub fn set_active_touched(
                 match projection_verdict(&link, &src, &row.kind) {
                     Ok(true) => {
                         if row.kind == "zip" {
-                            note_zip_projection(conn, &key, &row.file_name, &link);
+                            note_zip_projection(conn, &key, &row.file_name, &link, &src);
                         }
                         mark_active(conn, &key, &row, &mut rep);
                     }

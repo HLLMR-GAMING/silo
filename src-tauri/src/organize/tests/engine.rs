@@ -243,7 +243,7 @@ fn a_parked_mod_still_marked_active_is_reconciled() {
     let key = crate::modsroot::canonical_key(&base);
     std::fs::write(base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"), b"PK").unwrap();
     organize_row(&conn, &base, "FS25_Foo", "Vehicles", true);
-    db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
+    db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1, None);
 
     let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
     assert_eq!(rep.changed, 1);
@@ -256,7 +256,7 @@ fn a_parked_mod_still_marked_active_is_reconciled() {
 
     // An inactive row can keep a record too (a crash after linking, before the flag, then
     // the file removed): dropped all the same, and nothing counted as changed.
-    db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
+    db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1, None);
     let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
     assert_eq!((rep.changed, rep.skipped), (0, 1));
     assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none());
@@ -278,7 +278,7 @@ fn a_slot_that_cant_be_checked_is_reported_not_reconciled() {
     let conn = db::open(&base.join("silo.db")).unwrap();
     let key = crate::modsroot::canonical_key(&mods);
     organize_row(&conn, &mods, "FS25_Foo", "Vehicles", true);
-    db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
+    db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1, None);
     std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o000)).unwrap();
     if mods.join("FS25_Foo.zip").symlink_metadata().is_ok() {
         // Running as root: permissions don't stop the look, so there's nothing to test.
@@ -764,7 +764,7 @@ fn zip_copy_fixture(base: &Path, conn: &Connection) -> (PathBuf, PathBuf) {
     let flat = base.join("FS25_Foo.zip");
     std::fs::copy(&src, &flat).unwrap();
     let (size, mtime) = file_stats(&flat).unwrap();
-    db::record_projection(conn, &key, "FS25_Foo.zip", size, mtime);
+    db::record_projection(conn, &key, "FS25_Foo.zip", size, mtime, None);
     (src, flat)
 }
 
@@ -1021,7 +1021,7 @@ fn flatten_hides_neither_name_when_two_could_be_a_kept_mods_zip() {
         let flat = base.join(&file);
         std::fs::write(&flat, b"PK\x03\x04 the archived build").unwrap();
         let (size, mtime) = file_stats(&flat).unwrap();
-        db::record_projection(&conn, &key, &file, size, mtime);
+        db::record_projection(&conn, &key, &file, size, mtime, None);
         // The archived zip, cut short, under other casing; and its hardlink, the accent decomposed.
         let (renamed, twin) = ("fs25_caf\u{e9}.zip", "fs25_cafe\u{301}.zip");
         let (first, second) = if twin_first {

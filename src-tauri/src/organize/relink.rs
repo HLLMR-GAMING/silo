@@ -135,7 +135,14 @@ pub(super) fn relink_with(
                     db::forget_projection(conn, &key, &row.file_name);
                     if hardlinks {
                         if let Some((size, mtime)) = file_stats(&flat) {
-                            db::record_projection(conn, &key, &row.file_name, size, mtime);
+                            db::record_projection(
+                                conn,
+                                &key,
+                                &row.file_name,
+                                size,
+                                mtime,
+                                file_stats(&src),
+                            );
                         }
                     }
                 }
@@ -442,12 +449,19 @@ pub(super) fn replace_zip_link_if_linkable_with(
     Ok(true)
 }
 
-/// A zip's mods-folder entry `link` was just (re)made by Silo: refresh its projection record so
-/// later deactivates prove it's Silo's without hashing. A symlink is identified structurally and
-/// keeps none.
-pub(crate) fn note_zip_projection(conn: &Connection, key: &str, file_name: &str, link: &Path) {
+/// A zip's mods-folder entry `link` was just (re)made by Silo from archived `src`: refresh its
+/// projection record (with `src`'s stamp, so a library copy changed later is noticed) so later
+/// deactivates prove it's Silo's without hashing. A symlink is identified structurally and keeps
+/// none.
+pub(crate) fn note_zip_projection(
+    conn: &Connection,
+    key: &str,
+    file_name: &str,
+    link: &Path,
+    src: &Path,
+) {
     db::forget_projection(conn, key, file_name);
     if let Some((size, mtime)) = file_stats(link) {
-        db::record_projection(conn, key, file_name, size, mtime);
+        db::record_projection(conn, key, file_name, size, mtime, file_stats(src));
     }
 }

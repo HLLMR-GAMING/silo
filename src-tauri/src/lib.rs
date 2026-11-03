@@ -324,7 +324,7 @@ fn scan_library(
         // names is told apart without hashing (#353).
         let records: Vec<scan::ProjectionRecords> = roots
             .iter()
-            .map(|r| db::load_projections(conn, &modsroot::canonical_key(r)))
+            .map(|r| db::load_link_records(conn, &modsroot::canonical_key(r)))
             .collect();
         let out = scan::scan_layouts_with(layouts, &records, &cache, progress);
 
@@ -1155,7 +1155,7 @@ async fn download_update(
         if let Some(flat) = &done.relinked {
             if let (Ok(conn), Some(name)) = (db::open(&db), flat.file_name()) {
                 let key = modsroot::canonical_key(&layout.mods);
-                organize::note_zip_projection(&conn, &key, &name.to_string_lossy(), flat);
+                organize::note_zip_projection(&conn, &key, &name.to_string_lossy(), flat, &dest);
             }
         }
         let label = file_label(&dest);
