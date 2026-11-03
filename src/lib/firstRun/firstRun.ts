@@ -2,7 +2,7 @@
 // organize summary both the setup flow and the Organize dialog show.
 //   const which = firstRunScreen(await firstRunState());   // "onboarding" | "whatsNew" | null
 import { invoke } from "@tauri-apps/api/core";
-import type { PlannedMove } from "../types";
+import type { ModInput, PlannedMove } from "../types";
 import { formatCount, plural } from "../plural";
 import type { ModsRootStatus } from "../api";
 
@@ -79,19 +79,36 @@ export function filingFailures(errors: string[], plan: PlannedMove[]): FilingFai
 }
 
 /**
- * Planned mods a scan since the preview no longer finds loose, and that aren't in the library
- * either: deleted or moved away. They never reach the backend, so name them here instead of
- * leaving "Filed 0 mods" or a silent short count (#427).
- * @param loose tech names fileable now; @param filed tech names already in the library
+ * What to file for `plan`, after a scan since the preview (#427). A planned mod still loose is
+ * filed as it is now. One the scan no longer finds loose, whose file isn't in the library either,
+ * is passed on as previewed, so the backend checks the disk and says whether it's gone or why it
+ * can't tell: a scan that couldn't read a folder leaves mods out that aren't gone. One whose file
+ * is in the library now is left out (filed since).
+ * @param loose fileable now, by tech name; @param planned the preview's inputs, by tech name
+ * @param filedFiles file names in the library now
  */
-export function vanishedFromPlan(plan: PlannedMove[], loose: Set<string>, filed: Set<string>): FilingFailure[] {
-  return plan
-    .filter((p) => !loose.has(p.techName) && !filed.has(p.techName))
-    .map((p) => ({
-      techName: p.techName,
-      fileName: p.fileName,
-      message: "is no longer in your mods folder, so Silo didn't file it.",
-    }));
+export function filingInputs(
+  plan: PlannedMove[],
+  loose: Map<string, ModInput>,
+  planned: Map<string, ModInput>,
+  filedFiles: Set<string>,
+): ModInput[] {
+  const out: ModInput[] = [];
+  for (const p of plan) {
+    const now = loose.get(p.techName);
+    if (now) out.push(now);
+    else if (!filedFiles.has(p.fileName))
+      out.push(
+        planned.get(p.techName) ?? {
+          techName: p.techName,
+          fileName: p.fileName,
+          kind: "zip",
+          category: p.category,
+          subcategory: null,
+        },
+      );
+  }
+  return out;
 }
 
 /** How filing went: refused (another change is running; the app said why) or done. */

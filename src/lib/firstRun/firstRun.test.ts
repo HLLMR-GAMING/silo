@@ -5,7 +5,7 @@ import {
   failureDetails,
   fileInRuns,
   filingFailures,
-  vanishedFromPlan,
+  filingInputs,
   filingProgress,
   firstRunScreen,
   folderUsable,
@@ -16,7 +16,7 @@ import {
   type FirstRunState,
 } from "./firstRun";
 import type { ModsRootStatus } from "../api";
-import type { PlannedMove } from "../types";
+import type { ModInput, PlannedMove } from "../types";
 
 const fresh: FirstRunState = {
   onboardingDone: false,
@@ -32,7 +32,9 @@ describe("firstRunScreen", () => {
 
   it("never shows the setup flow again once it was finished or skipped", () => {
     expect(firstRunScreen({ ...fresh, onboardingDone: true })).toBeNull();
-    expect(firstRunScreen({ ...fresh, onboardingDone: true, whatsNewSeen: true })).toBeNull();
+    expect(
+      firstRunScreen({ ...fresh, onboardingDone: true, whatsNewSeen: true }),
+    ).toBeNull();
   });
 
   it("an upgrading user with organized mods gets What's new instead", () => {
@@ -44,17 +46,28 @@ describe("firstRunScreen", () => {
   });
 
   it("What's new shows once", () => {
-    expect(firstRunScreen({ ...fresh, hasOrganized: true, whatsNewSeen: true })).toBeNull();
+    expect(
+      firstRunScreen({ ...fresh, hasOrganized: true, whatsNewSeen: true }),
+    ).toBeNull();
   });
 
   it("a library organized after the setup flow sees neither", () => {
     expect(
-      firstRunScreen({ onboardingDone: true, whatsNewSeen: true, hasOrganized: true, hasCuration: true }),
+      firstRunScreen({
+        onboardingDone: true,
+        whatsNewSeen: true,
+        hasOrganized: true,
+        hasCuration: true,
+      }),
     ).toBeNull();
   });
 });
 
-const mv = (techName: string, category: string, fileName = `${techName}.zip`): PlannedMove => ({
+const mv = (
+  techName: string,
+  category: string,
+  fileName = `${techName}.zip`,
+): PlannedMove => ({
   techName,
   fileName,
   category,
@@ -64,7 +77,12 @@ const mv = (techName: string, category: string, fileName = `${techName}.zip`): P
 
 describe("groupPlan", () => {
   it("groups by category, biggest first, files by name", () => {
-    const g = groupPlan([mv("b", "Maps"), mv("z", "Tractors"), mv("a", "Tractors"), mv("c", "Animals")]);
+    const g = groupPlan([
+      mv("b", "Maps"),
+      mv("z", "Tractors"),
+      mv("a", "Tractors"),
+      mv("c", "Animals"),
+    ]);
     expect(g.map((x) => [x.category, x.moves.map((m) => m.techName)])).toEqual([
       ["Tractors", ["a", "z"]],
       ["Animals", ["c"]],
@@ -73,24 +91,58 @@ describe("groupPlan", () => {
   });
 });
 
-describe("vanishedFromPlan (#427)", () => {
+describe("filingInputs (#427)", () => {
   const plan = [mv("FS25_A", "Tractors"), mv("FS25_B", "Maps")];
-  const gone = (t: string) => ({
+  const input = (t: string, category = "Tractors"): ModInput => ({
     techName: t,
     fileName: `${t}.zip`,
-    message: "is no longer in your mods folder, so Silo didn't file it.",
+    kind: "zip",
+    category,
+    subcategory: null,
+  });
+  const planned = new Map([
+    ["FS25_A", input("FS25_A")],
+    ["FS25_B", input("FS25_B", "Maps")],
+  ]);
+
+  it("files a still-loose mod as it is now", () => {
+    const now = { ...input("FS25_A"), category: "Trailers" };
+    expect(
+      filingInputs(
+        plan,
+        new Map([["FS25_A", now]]),
+        planned,
+        new Set(["FS25_B.zip"]),
+      ),
+    ).toEqual([now]);
   });
 
-  it("names a planned mod that is neither loose nor filed now", () => {
-    expect(vanishedFromPlan(plan, new Set(["FS25_A"]), new Set())).toEqual([gone("FS25_B")]);
+  it("passes on one the scan no longer finds, so the backend checks the disk", () => {
+    expect(
+      filingInputs(
+        plan,
+        new Map([["FS25_A", input("FS25_A")]]),
+        planned,
+        new Set(),
+      ),
+    ).toEqual([input("FS25_A"), input("FS25_B", "Maps")]);
+    // None left loose: all passed on, none dropped.
+    expect(filingInputs(plan, new Map(), planned, new Set())).toHaveLength(2);
   });
 
-  it("names every planned mod when none is left", () => {
-    expect(vanishedFromPlan(plan, new Set(), new Set())).toEqual([gone("FS25_A"), gone("FS25_B")]);
-  });
-
-  it("leaves out a mod already in the library and one still loose", () => {
-    expect(vanishedFromPlan(plan, new Set(["FS25_A"]), new Set(["FS25_B"]))).toEqual([]);
+  it("leaves out one whose file is in the library now, matched by file name", () => {
+    expect(
+      filingInputs(
+        plan,
+        new Map(),
+        planned,
+        new Set(["FS25_A.zip", "FS25_B.zip"]),
+      ),
+    ).toEqual([]);
+    // A library entry with the same tech name but another file (a folder B) doesn't count.
+    expect(
+      filingInputs(plan, new Map(), planned, new Set(["FS25_A.zip", "FS25_B"])),
+    ).toEqual([input("FS25_B", "Maps")]);
   });
 });
 
@@ -98,8 +150,14 @@ describe("filingFailures", () => {
   const plan = [mv("FS25_A", "Tractors"), mv("FS25_B", "Maps")];
 
   it("matches report lines to the planned files", () => {
-    expect(filingFailures(["FS25_B: move: Access is denied. (os error 5)"], plan)).toEqual([
-      { techName: "FS25_B", fileName: "FS25_B.zip", message: "move: Access is denied. (os error 5)" },
+    expect(
+      filingFailures(["FS25_B: move: Access is denied. (os error 5)"], plan),
+    ).toEqual([
+      {
+        techName: "FS25_B",
+        fileName: "FS25_B.zip",
+        message: "move: Access is denied. (os error 5)",
+      },
     ]);
   });
 
@@ -139,17 +197,35 @@ describe("folderVariant", () => {
   it("follows the mods-folder notices' order", () => {
     expect(folderVariant(null)).toBe("unknown");
     expect(folderVariant(st({ path: null }))).toBe("unknown");
-    expect(folderVariant(st({ source: "user", available: false, layoutProblem: "x" }))).toBe("unavailable");
-    expect(folderVariant(st({ layoutProblem: "Shares files", modsFolderMissing: true }))).toBe("layout");
-    expect(folderVariant(st({ modsFolderMissing: true, mismatch: true }))).toBe("missing");
-    expect(folderVariant(st({ source: "user", mismatch: true }))).toBe("mismatch");
+    expect(
+      folderVariant(
+        st({ source: "user", available: false, layoutProblem: "x" }),
+      ),
+    ).toBe("unavailable");
+    expect(
+      folderVariant(
+        st({ layoutProblem: "Shares files", modsFolderMissing: true }),
+      ),
+    ).toBe("layout");
+    expect(folderVariant(st({ modsFolderMissing: true, mismatch: true }))).toBe(
+      "missing",
+    );
+    expect(folderVariant(st({ source: "user", mismatch: true }))).toBe(
+      "mismatch",
+    );
     expect(folderVariant(st({ source: "gameOverride" }))).toBe("override");
     expect(folderVariant(st({}))).toBe("ok");
   });
 
   it("only moves on from a folder Silo can use", () => {
-    expect(["ok", "override", "mismatch"].every((v) => folderUsable(v as never))).toBe(true);
-    expect(["unknown", "unavailable", "layout", "missing"].some((v) => folderUsable(v as never))).toBe(false);
+    expect(
+      ["ok", "override", "mismatch"].every((v) => folderUsable(v as never)),
+    ).toBe(true);
+    expect(
+      ["unknown", "unavailable", "layout", "missing"].some((v) =>
+        folderUsable(v as never),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -158,7 +234,9 @@ describe("fileInRuns", () => {
     let call = 0;
     return vi.fn(async (run: string[]) => {
       if (call++ === throwOn) throw new Error("GAME_RUNNING");
-      const errors = run.filter((t) => fail.has(t)).map((t) => `${t}: move: in use`);
+      const errors = run
+        .filter((t) => fail.has(t))
+        .map((t) => `${t}: move: in use`);
       return { changed: run.length - errors.length, errors };
     });
   };
@@ -166,10 +244,21 @@ describe("fileInRuns", () => {
   it("files in runs with progress after each", async () => {
     const a = apply(new Set(["c"]));
     const seen: number[] = [];
-    const out = await fileInRuns(["a", "b", "c", "d", "e"], a, 2, (d) => seen.push(d));
-    expect(a.mock.calls.map((c) => c[0])).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+    const out = await fileInRuns(["a", "b", "c", "d", "e"], a, 2, (d) =>
+      seen.push(d),
+    );
+    expect(a.mock.calls.map((c) => c[0])).toEqual([
+      ["a", "b"],
+      ["c", "d"],
+      ["e"],
+    ]);
     expect(seen).toEqual([2, 4, 5]);
-    expect(out).toEqual({ errors: ["c: move: in use"], thrown: null, changed: 4, done: 5 });
+    expect(out).toEqual({
+      errors: ["c: move: in use"],
+      thrown: null,
+      changed: 4,
+      done: 5,
+    });
   });
 
   it("without progress, files in one call", async () => {
@@ -179,7 +268,12 @@ describe("fileInRuns", () => {
   });
 
   it("stops at a throw and keeps what was filed", async () => {
-    const out = await fileInRuns(["a", "b", "c", "d"], apply(new Set(), 1), 2, () => {});
+    const out = await fileInRuns(
+      ["a", "b", "c", "d"],
+      apply(new Set(), 1),
+      2,
+      () => {},
+    );
     expect(out.changed).toBe(2);
     expect(out.done).toBe(2);
     expect(String(out.thrown)).toContain("GAME_RUNNING");
@@ -200,7 +294,9 @@ describe("relinkFiled", () => {
         throw new Error("The library archive drive isn't connected.");
       }),
     ).resolves.toBeUndefined();
-    expect(String((run as { relinkError?: unknown }).relinkError)).toContain("archive drive");
+    expect(String((run as { relinkError?: unknown }).relinkError)).toContain(
+      "archive drive",
+    );
   });
 
   it("leaves a clean run as it was", async () => {
@@ -224,7 +320,11 @@ describe("helpers", () => {
 
 describe("filingProgress (#322)", () => {
   it("counts mods while filing", () => {
-    expect(filingProgress(25, 50)).toEqual({ value: 25, max: 50, label: "Filing 25 of 50…" });
+    expect(filingProgress(25, 50)).toEqual({
+      value: 25,
+      max: 50,
+      label: "Filing 25 of 50…",
+    });
   });
 
   it("names the steps after the last run instead of sitting on N of N", () => {
@@ -242,12 +342,20 @@ describe("filingProgress (#322)", () => {
       label: "Reading your library: 40 of 194 mods…",
     });
     // Not counted yet: the generic step.
-    expect(filingProgress(194, 194, { done: 0, total: 0 }).value).toBeUndefined();
+    expect(
+      filingProgress(194, 194, { done: 0, total: 0 }).value,
+    ).toBeUndefined();
     // A read still running mid-filing doesn't take over the filing count.
-    expect(filingProgress(10, 194, { done: 40, total: 194 }).label).toBe("Filing 10 of 194…");
+    expect(filingProgress(10, 194, { done: 40, total: 194 }).label).toBe(
+      "Filing 10 of 194…",
+    );
   });
 
   it("has no count before filing knows its total", () => {
-    expect(filingProgress(0, 0)).toEqual({ value: undefined, max: 1, label: "Filing…" });
+    expect(filingProgress(0, 0)).toEqual({
+      value: undefined,
+      max: 1,
+      label: "Filing…",
+    });
   });
 });

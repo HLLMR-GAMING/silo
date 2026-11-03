@@ -259,7 +259,7 @@
     fileInRuns,
     relinkFiled,
     filingFailures,
-    vanishedFromPlan,
+    filingInputs,
     firstRunScreen,
     firstRunState,
     nMods,
@@ -1568,28 +1568,28 @@
    * problems come back as failures (shown in place, and logged to the activity list); a thrown
    * error (the game is running, the library is busy) is reported as usual and every planned mod
    * still loose counts as not moved.
+   * @param planned the inputs the plan was made from
    * @returns refused, or the mods that couldn't be filed
    */
   async function fileWithProgress(
     plan: PlannedMove[],
+    planned: ModInput[],
     onProgress: (done: number, total: number) => void,
   ): Promise<OrganizeOutcome> {
-    const wanted = new Set(plan.map((p) => p.techName));
-    const inputs = looseInputs().inputs.filter((i) => wanted.has(i.techName));
-    const gone = vanishedFromPlan(
-      plan,
-      new Set(inputs.map((i) => i.techName)),
-      new Set(effectiveMods.filter((m) => m.organized).map((m) => m.techName)),
-    );
-    if (inputs.length === 0 && gone.length > 0) return { failures: gone, filed: 0 };
+    const loose = new Map(looseInputs().inputs.map((i) => [i.techName, i]));
+    const filedFiles = new Set(effectiveMods.filter((m) => m.organized).map((m) => fileName(m.path)));
+    const inputs = filingInputs(plan, loose, new Map(planned.map((i) => [i.techName, i])), filedFiles);
+    // Every planned file is in the library now (filed since the preview): nothing left to do.
+    if (inputs.length === 0) return { failures: [], filed: 0 };
     const out = await fileLoose(
       inputs,
-      inputs.map((i) => i.techName),
+      // Keep active only what's still loose: the rest are passed on for the backend to check.
+      inputs.filter((i) => loose.has(i.techName)).map((i) => i.techName),
       true,
       { onProgress },
     );
     if (!out) return { refused: true };
-    const failures = [...gone, ...filingFailures(out.errors, plan)];
+    const failures = filingFailures(out.errors, plan);
     if (out.thrown !== null) {
       // Shown in place (the dialog or the setup flow), and kept in the activity list.
       const why = inlineError(out.thrown, "Filing mods into the library");
@@ -1600,8 +1600,7 @@
         if (loose.has(p.techName) && !listed.has(p.techName))
           failures.push({ techName: p.techName, fileName: p.fileName, message: why });
     } else if (failures.length) {
-      const lines = [...gone.map((f) => `${f.techName}: ${f.fileName} ${f.message}`), ...out.errors];
-      reportError(lines.join("\n"), "Filing mods into the library", { quiet: true });
+      reportError(out.errors.join("\n"), "Filing mods into the library", { quiet: true });
     }
     return { failures, filed: out.changed, relinkFailed: out.relinkError !== undefined };
   }
@@ -1666,9 +1665,9 @@
       if (problem !== null) reportError(problem, "Filing mods from the archive folder");
       return;
     }
-    const { plan } = organizePreview;
+    const { plan, inputs: planned } = organizePreview;
     organizePreview = { ...organizePreview, applying: true, progress: { done: 0, total: plan.length } };
-    const out = await fileWithProgress(plan, (done, total) => {
+    const out = await fileWithProgress(plan, planned, (done, total) => {
       if (organizePreview) organizePreview = { ...organizePreview, progress: { done, total } };
     });
     if (out.refused) {
@@ -1690,8 +1689,10 @@
     }
     organizePreview = null;
     // The filed mods couldn't be linked back: that problem was reported instead.
-    if (!out.relinkFailed)
-      success(`Filed ${modsCount(out.filed)} into your library. All active mods stay active.`);
+    if (out.relinkFailed) return;
+    // Filed since the preview (the auto-filer, say): say so rather than "Filed 0 mods".
+    if (out.filed === 0) success("Those mods are already in your library.");
+    else success(`Filed ${modsCount(out.filed)} into your library. All active mods stay active.`);
   }
 
   // ── First run (#250): the setup flow for a new library, "What's new" for an upgrade ─────
@@ -1786,8 +1787,12 @@
 
   /** The setup flow's dry run, kept for filing (so failures can name their files). */
   let firstRunPlan: PlannedMove[] = [];
+  /** The inputs firstRunPlan was made from. */
+  let firstRunInputs: ModInput[] = [];
   async function planFirstRun(): Promise<PlannedMove[]> {
-    firstRunPlan = await planOrganize(looseInputs().inputs);
+    const { inputs } = looseInputs();
+    firstRunPlan = await planOrganize(inputs);
+    firstRunInputs = inputs;
     return firstRunPlan;
   }
 
@@ -1799,6 +1804,7 @@
     const wanted = new Set(techNames);
     const out = await fileWithProgress(
       firstRunPlan.filter((p) => wanted.has(p.techName)),
+      firstRunInputs,
       onProgress,
     );
     if (!out.refused) {
