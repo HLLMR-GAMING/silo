@@ -1423,3 +1423,85 @@ fn undo_organizing_leaves_a_zip_whose_name_another_copy_holds() {
     assert!(db::load_organized(&conn, &key).is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// #423: the other copy is found whatever its case, and the mod's own projection, cleared during
+// the pass, never counts as another copy even when the copies were read before it was cleared.
+#[test]
+fn undo_organizing_matches_copies_case_insensitively_and_not_its_own_link() {
+    let base = temp_dir_for("undo_twin_case");
+    std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&base);
+    for t in ["FS25_Aaa", "FS25_Bar", "FS25_Foo"] {
+        std::fs::write(
+            base.join(ARCHIVE).join(format!("Vehicles/{t}.zip")),
+            format!("PK {t}"),
+        )
+        .unwrap();
+        organize_row(&conn, &base, t, "Vehicles", false);
+    }
+    // FS25_Aaa comes first and reads the copies while FS25_Bar's link is still there.
+    let on: HashSet<String> = ["FS25_Bar".to_string(), "FS25_Foo".to_string()]
+        .into_iter()
+        .collect();
+    assert!(set_active(&conn, &layout, &on).errors.is_empty());
+    let folder = base.join("fs25_foo");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+
+    let rep = flatten(&conn, &layout);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.notices.len(), 1, "{:?}", rep.notices);
+    assert!(
+        rep.notices[0].starts_with("FS25_Foo: another copy of this mod, fs25_foo,"),
+        "{:?}",
+        rep.notices
+    );
+    assert_eq!(
+        std::fs::read(base.join("FS25_Aaa.zip")).unwrap(),
+        b"PK FS25_Aaa"
+    );
+    assert_eq!(
+        std::fs::read(base.join("FS25_Bar.zip")).unwrap(),
+        b"PK FS25_Bar",
+        "its own link isn't another copy"
+    );
+    assert!(base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// #423: a folder mod left in the default archive keeps its empty folders through cleanup.
+#[test]
+fn undo_organizing_keeps_a_left_folder_mod_whole() {
+    let base = temp_dir_for("undo_twin_dir");
+    let arch = base.join(ARCHIVE).join("Maps");
+    std::fs::create_dir_all(arch.join("FS25_Map").join("data").join("empty")).unwrap();
+    std::fs::write(arch.join("FS25_Map").join("modDesc.xml"), "<modDesc/>").unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&base);
+    db::upsert_organized(
+        &conn,
+        &crate::modsroot::canonical_key(&base),
+        &OrganizedRow {
+            tech_name: "FS25_Map".into(),
+            file_name: "FS25_Map".into(),
+            kind: "dir".into(),
+            category: "Maps".into(),
+            subcategory: None,
+            active: false,
+        },
+    )
+    .unwrap();
+    std::fs::write(base.join("FS25_Map.zip"), b"PK the zip copy").unwrap();
+
+    let rep = flatten(&conn, &layout);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.notices.len(), 1, "{:?}", rep.notices);
+    assert!(
+        arch.join("FS25_Map").join("data").join("empty").is_dir(),
+        "the mod's empty folder survives"
+    );
+    assert!(arch.join("FS25_Map").join("modDesc.xml").is_file());
+    assert!(base.join("FS25_Map.zip").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}

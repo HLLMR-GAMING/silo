@@ -392,9 +392,12 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     // The archive entry of each mod this pass reported by name and may have left in the archive
     // (and whether it's a folder mod): its files aren't unrecognized (#410).
     let mut reported: Vec<(PathBuf, bool)> = Vec::new();
-    // Each tech name's copies in the mods folder by entry name, read once the first restore is
-    // due, and kept up to date with what this pass restores.
+    // Each tech name's copies in the mods folder by entry name (keyed in ASCII lower case, see
+    // `scan::root_entries_by_tech`), read once the first restore is due, and kept up to date with
+    // what this pass removes and restores.
     let mut in_root: Option<std::collections::HashMap<String, HashSet<String>>> = None;
+    // Archived mods this pass leaves in the archive on purpose: cleanup must not touch them.
+    let mut retained: Vec<PathBuf> = Vec::new();
     for row in db::load_organized(conn, &key) {
         categories.insert(row.category.clone());
         let link = root.join(&row.file_name);
@@ -432,7 +435,16 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             let mut kept = None;
             if occupied {
                 match clear_projection(&link, &src, root) {
-                    Ok(k) => kept = k,
+                    Ok(k) => {
+                        kept = k;
+                        // That slot is free now: it no longer counts as a copy.
+                        if let Some(names) = in_root
+                            .as_mut()
+                            .and_then(|c| c.get_mut(&row.tech_name.to_ascii_lowercase()))
+                        {
+                            names.retain(|n| !n.eq_ignore_ascii_case(&row.file_name));
+                        }
+                    }
                     Err(e) => {
                         rep.errors.push(format!("{}: {e}", row.tech_name));
                         reported.push((src, is_dir));
@@ -444,9 +456,13 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             // the one the game loads: putting this one back would make two. Leave it in the
             // library, filed and parked, and say so (#423).
             let copies = in_root.get_or_insert_with(|| crate::scan::root_entries_by_tech(root));
-            let other = copies
-                .get(&row.tech_name)
-                .and_then(|names| names.iter().find(|n| **n != row.file_name).cloned());
+            let tech_key = row.tech_name.to_ascii_lowercase();
+            let other = copies.get(&tech_key).and_then(|names| {
+                names
+                    .iter()
+                    .find(|n| !n.eq_ignore_ascii_case(&row.file_name))
+                    .cloned()
+            });
             if let Some(other) = other {
                 rep.notices.push(format!(
                     "{}: another copy of this mod, {other}, is in your mods folder, and the game loads only one, so Silo left {} in your library. To put it back, move {other} out of your mods folder and undo organizing again.",
@@ -461,13 +477,14 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
                 }
                 db::forget_projection(conn, &key, &row.file_name);
                 rep.skipped += 1;
+                retained.push(src.clone());
                 reported.push((src, is_dir));
                 continue;
             }
             let restored = move_path(&src, &link);
             if restored.is_ok() {
                 copies
-                    .entry(row.tech_name.clone())
+                    .entry(tech_key)
                     .or_default()
                     .insert(row.file_name.clone());
             }
@@ -510,7 +527,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     // crash). Remove only provably-empty directories, and surface anything left untouched.
     // A mod reported by name above (kept, left alone, or not restored) isn't repeated as its
     // archived files being unrecognized (#410).
-    match cleanup_empty_archive(&layout.archive, true) {
+    match cleanup_empty_archive_keeping(&layout.archive, true, &retained) {
         Ok(leftover) => {
             // Each entry as spelled on disk, so a leftover listed under the folder's real
             // spelling matches it (looked up only when something was left).
@@ -606,20 +623,42 @@ pub(crate) fn cleanup_empty_archive(
     archive: &Path,
     remove_root: bool,
 ) -> std::io::Result<Vec<PathBuf>> {
+    cleanup_empty_archive_keeping(archive, remove_root, &[])
+}
+
+/// [`cleanup_empty_archive`], never entering or reporting the entries in `keep` (archived mods
+/// left there on purpose, #423): an empty folder inside a kept folder mod is part of that mod.
+pub(crate) fn cleanup_empty_archive_keeping(
+    archive: &Path,
+    remove_root: bool,
+    keep: &[PathBuf],
+) -> std::io::Result<Vec<PathBuf>> {
     let mut leftover = Vec::new();
     if !archive.exists() {
         return Ok(leftover);
     }
     // Returns true if `dir` is empty once processing finishes. At the top level, Silo's own
     // archive note (`relocate::ARCHIVE_NOTE`) counts as absent.
-    fn walk(dir: &Path, top: bool, leftover: &mut Vec<PathBuf>) -> std::io::Result<bool> {
+    fn walk(
+        dir: &Path,
+        top: bool,
+        keep: &[PathBuf],
+        leftover: &mut Vec<PathBuf>,
+    ) -> std::io::Result<bool> {
         let mut empty = true;
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
+            if keep
+                .iter()
+                .any(|k| k.as_os_str().eq_ignore_ascii_case(path.as_os_str()))
+            {
+                empty = false;
+                continue;
+            }
             // Use symlink semantics: never follow/recurse a link.
             if entry.file_type()?.is_dir() {
-                if walk(&path, false, leftover)? {
+                if walk(&path, false, keep, leftover)? {
                     let _ = std::fs::remove_dir(&path);
                 } else {
                     empty = false;
@@ -633,7 +672,7 @@ pub(crate) fn cleanup_empty_archive(
         }
         Ok(empty)
     }
-    if walk(archive, true, &mut leftover)? && remove_root {
+    if walk(archive, true, keep, &mut leftover)? && remove_root {
         let _ = std::fs::remove_file(archive.join(crate::relocate::ARCHIVE_NOTE));
         let _ = std::fs::remove_dir(archive);
     }

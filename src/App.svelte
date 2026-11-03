@@ -1845,7 +1845,9 @@
           return (
             `All ${nMods(mods.length)} go back into your mods folder, so the game loads every one of them` +
             (parked > 0 ? `, including the ${nMods(parked)} parked now` : "") +
-            ". Silo removes its links. Nothing is deleted."
+            ". Silo removes its links. Nothing is deleted." +
+            // Left on, the next scan would file them all again (#423).
+            (autoFileNew ? " Auto-file new mods is turned off, so they stay in your mods folder." : "")
           );
         })(),
         confirm: "Undo organizing",
@@ -1857,6 +1859,8 @@
     if (!op) return;
     try {
       const rep = await flatten();
+      // Off before the scan below, or it files the restored mods straight back (#423).
+      if (autoFileNew) setAutoFile(false);
       if (rep.errors.length)
         reportError(rep.errors.slice(0, 3).join("; "), "Undoing organizing");
       if (rep.notices?.length) info(rep.notices.join(" "), { duration: 10_000 });
