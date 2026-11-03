@@ -1561,16 +1561,25 @@ fn undo_organizing_keeps_a_left_folder_mod_whole_in_a_custom_archive() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-// #423, Windows and macOS: the mod's own link, spelled differently on disk (FS25_Foo.ZIP) after
-// the copies were read, is still its own slot, not another copy.
-#[cfg(not(target_os = "linux"))]
+/// Whether `dir` treats names that differ only in case as one entry (probed, not assumed).
+fn folder_ignores_case(dir: &Path) -> bool {
+    let probe = dir.join("Silo-Case-Probe.tmp");
+    std::fs::write(&probe, b"").unwrap();
+    let same = dir.join("silo-case-probe.TMP").exists();
+    std::fs::remove_file(&probe).unwrap();
+    same
+}
+
+// #423: on a folder that ignores case, the mod's own link respelled FS25_Foo.ZIP after the copies
+// were read is still its own slot; on one that doesn't, a separate fs25_foo.zip is another copy,
+// whether the mod's own slot is empty or holds its link.
 #[test]
-fn undo_organizing_treats_its_own_link_in_another_case_as_its_own() {
-    let base = temp_dir_for("undo_twin_spelling");
+fn undo_organizing_tells_its_own_slot_from_a_case_variant_by_what_the_folder_does() {
+    let base = temp_dir_for("undo_twin_case_fs");
     std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
     let conn = db::open(&base.join("silo.db")).unwrap();
     let layout = Layout::default_for(&base);
-    for t in ["FS25_Aaa", "FS25_Foo"] {
+    for t in ["FS25_Aaa", "FS25_Bar", "FS25_Foo"] {
         std::fs::write(
             base.join(ARCHIVE).join(format!("Vehicles/{t}.zip")),
             format!("PK {t}"),
@@ -1578,48 +1587,46 @@ fn undo_organizing_treats_its_own_link_in_another_case_as_its_own() {
         .unwrap();
         organize_row(&conn, &base, t, "Vehicles", false);
     }
-    let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+    // FS25_Bar linked (its slot occupied), FS25_Foo not (its slot empty).
+    let on: HashSet<String> = ["FS25_Bar".to_string()].into_iter().collect();
     assert!(set_active(&conn, &layout, &on).errors.is_empty());
-    std::fs::rename(base.join("FS25_Foo.zip"), base.join("FS25_Foo.ZIP")).unwrap();
-    let rep = flatten(&conn, &layout);
-    assert!(
-        rep.errors.is_empty() && rep.notices.is_empty(),
-        "{:?} {:?}",
-        rep.errors,
-        rep.notices
+    let archived = |t: &str| base.join(ARCHIVE).join(format!("Vehicles/{t}.zip"));
+    if folder_ignores_case(&base) {
+        std::fs::rename(base.join("FS25_Bar.zip"), base.join("FS25_Bar.ZIP")).unwrap();
+        let rep = flatten(&conn, &layout);
+        assert!(
+            rep.errors.is_empty() && rep.notices.is_empty(),
+            "{:?} {:?}",
+            rep.errors,
+            rep.notices
+        );
+        assert!(
+            archived("FS25_Bar").symlink_metadata().is_err(),
+            "its own link, so restored"
+        );
+        assert!(archived("FS25_Foo").symlink_metadata().is_err());
+    } else {
+        std::fs::write(base.join("fs25_bar.zip"), b"PK a separate copy").unwrap();
+        std::fs::write(base.join("fs25_foo.zip"), b"PK another separate copy").unwrap();
+        let rep = flatten(&conn, &layout);
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert_eq!(rep.notices.len(), 2, "{:?}", rep.notices);
+        assert!(
+            archived("FS25_Bar").is_file(),
+            "left: its slot held its link, beside a separate copy"
+        );
+        assert!(
+            archived("FS25_Foo").is_file(),
+            "left: its slot was empty, beside a separate copy"
+        );
+        assert_eq!(
+            std::fs::read(base.join("fs25_bar.zip")).unwrap(),
+            b"PK a separate copy"
+        );
+    }
+    assert_eq!(
+        std::fs::read(base.join("FS25_Aaa.zip")).unwrap(),
+        b"PK FS25_Aaa"
     );
-    assert!(
-        base.join(ARCHIVE)
-            .join("Vehicles/FS25_Foo.zip")
-            .symlink_metadata()
-            .is_err(),
-        "restored"
-    );
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-// #423, Linux: a separate zip whose name differs only in case is another copy, not the mod's slot.
-#[cfg(target_os = "linux")]
-#[test]
-fn undo_organizing_sees_a_case_variant_zip_as_another_copy_on_linux() {
-    let base = temp_dir_for("undo_twin_variant");
-    std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
-    let conn = db::open(&base.join("silo.db")).unwrap();
-    let layout = Layout::default_for(&base);
-    std::fs::write(
-        base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"),
-        b"PK archived",
-    )
-    .unwrap();
-    organize_row(&conn, &base, "FS25_Foo", "Vehicles", false);
-    std::fs::write(base.join("fs25_foo.zip"), b"PK the user's other copy").unwrap();
-    let rep = flatten(&conn, &layout);
-    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
-    assert_eq!(rep.notices.len(), 1, "{:?}", rep.notices);
-    assert!(
-        base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip").is_file(),
-        "left in the library"
-    );
-    assert!(base.join("FS25_Foo.zip").symlink_metadata().is_err());
     let _ = std::fs::remove_dir_all(&base);
 }

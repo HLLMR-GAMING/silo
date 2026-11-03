@@ -432,6 +432,13 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             }
             // Normal restore: drop our projection to free the slot, then move the archived
             // original back into the root.
+            // The mod's own slot as listed on disk (`FS25_Foo.ZIP` on a folder that ignores case),
+            // found while it's still there: only that entry is this mod's, any other is a copy.
+            let own = if occupied {
+                own_spelling(root, &row.file_name)
+            } else {
+                None
+            };
             let mut kept = None;
             if occupied {
                 match clear_projection(&link, &src, root) {
@@ -442,7 +449,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
                             .as_mut()
                             .and_then(|c| c.get_mut(&row.tech_name.to_ascii_lowercase()))
                         {
-                            names.retain(|n| !same_slot(n, &row.file_name));
+                            names.retain(|n| *n != row.file_name && Some(n) != own.as_ref());
                         }
                     }
                     Err(e) => {
@@ -460,7 +467,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             let other = copies.get(&tech_key).and_then(|names| {
                 names
                     .iter()
-                    .find(|n| !same_slot(n, &row.file_name))
+                    .find(|n| **n != row.file_name && Some(*n) != own.as_ref())
                     .cloned()
             });
             if let Some(other) = other {
@@ -576,14 +583,23 @@ pub(crate) fn in_archive_entry(path: &Path, entry: &Path, is_dir: bool) -> bool 
 /// it (hardlinks whose names differ only that way), Silo can't tell which, so `None`, as when a
 /// part can't be listed or found: the caller then matches the recorded spelling only, so no
 /// other file is ever taken for the entry.
-/// Whether two entry names in one folder are the same slot: the same name, ignoring ASCII case
-/// where the file system usually does (Windows, macOS), exactly on Linux.
-fn same_slot(a: &str, b: &str) -> bool {
-    if cfg!(target_os = "linux") {
-        a == b
-    } else {
-        a.eq_ignore_ascii_case(b)
+/// The name `root` lists for the entry at `name`: `name` itself when it's listed, else the one
+/// entry spelled differently in case that is the same entry (a folder that ignores case finds
+/// `FS25_Foo.ZIP` at `FS25_Foo.zip`). None when there's no such entry. Decided by what the folder
+/// does, not by the platform: a case-sensitive folder on any system lists the variants apart.
+fn own_spelling(root: &Path, name: &str) -> Option<String> {
+    let listed: Vec<String> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    if listed.iter().any(|n| n == name) {
+        return Some(name.to_string());
     }
+    let at = crate::scratch::entry_number(&root.join(name))?;
+    listed.into_iter().find(|n| {
+        n.eq_ignore_ascii_case(name) && crate::scratch::entry_number(&root.join(n)) == Some(at)
+    })
 }
 
 pub(crate) fn spelled_on_disk(archive: &Path, entry: &Path) -> Option<PathBuf> {
