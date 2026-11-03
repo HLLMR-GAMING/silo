@@ -52,9 +52,26 @@ pub fn apply_organize(
             continue;
         }
         let from = source.join(&m.file_name);
-        if !from.exists() {
-            rep.skipped += 1;
-            continue;
+        // Gone since the caller listed it (deleted or moved after the preview): say so, or the
+        // result reads "Filed 0 mods" with no reason (#427). Only a confirmed absence says "gone".
+        match from.try_exists() {
+            Ok(true) => {}
+            Ok(false) => {
+                rep.errors.push(format!(
+                    "{}: {} is no longer there, so Silo didn't file it.",
+                    m.tech_name, m.file_name
+                ));
+                rep.skipped += 1;
+                continue;
+            }
+            Err(e) => {
+                rep.errors.push(format!(
+                    "{}: can't check {} ({e}), so Silo didn't file it.",
+                    m.tech_name, m.file_name
+                ));
+                rep.skipped += 1;
+                continue;
+            }
         }
         let dir = archive_dir(&layout.archive, &m.category);
         let to = dir.join(&m.file_name);
@@ -123,6 +140,19 @@ pub fn apply_organize(
 /// Reconcile the flat-root projection to exactly `active`: link the ones that
 /// should be active, remove links for the ones that shouldn't.
 pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) -> Report {
+    set_active_touched(conn, layout, active, None)
+}
+
+/// [`set_active`] for a change to the mods in `touched` (the ones the user turned on or off).
+/// A wanted mod outside it whose name already holds a file that isn't Silo's copy goes in
+/// `standing`, not `errors`: the change didn't cause it and Diagnose → Problems lists it. `None`
+/// reports it as an error, as before.
+pub fn set_active_touched(
+    conn: &Connection,
+    layout: &Layout,
+    active: &HashSet<String>,
+    touched: Option<&HashSet<String>>,
+) -> Report {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
@@ -255,17 +285,36 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 rep.skipped += 1;
             } else if matches_provenance(conn, &key, &link, &row.file_name) {
                 mark_active(conn, &key, &row, &mut rep);
-            } else if is_silo_projection(&link, &src, &row.kind) {
-                if row.kind == "zip" {
-                    note_zip_projection(conn, &key, &row.file_name, &link);
-                }
-                mark_active(conn, &key, &row, &mut rep);
             } else {
-                rep.errors.push(format!(
-                    "{}: {} in your mods folder isn't Silo's copy of this mod, so Silo left it there and the game loads that file instead. Pick which build to keep in Diagnose → Problems.",
-                    row.tech_name, row.file_name
-                ));
-                rep.skipped += 1;
+                match projection_verdict(&link, &src, &row.kind) {
+                    Ok(true) => {
+                        if row.kind == "zip" {
+                            note_zip_projection(conn, &key, &row.file_name, &link);
+                        }
+                        mark_active(conn, &key, &row, &mut rep);
+                    }
+                    Ok(false) => {
+                        let problem = format!(
+                            "{}: {} in your mods folder isn't Silo's copy of this mod, so Silo left it there and the game loads that file instead. Pick which build to keep in Diagnose → Problems.",
+                            row.tech_name, row.file_name
+                        );
+                        // Not this change's doing when it didn't touch the mod (#427).
+                        if touched.is_some_and(|t| !t.contains(&row.tech_name)) {
+                            rep.standing.push(problem);
+                        } else {
+                            rep.errors.push(problem);
+                        }
+                        rep.skipped += 1;
+                    }
+                    // Couldn't tell: an error whichever mods the change touched.
+                    Err(err) => {
+                        rep.errors.push(format!(
+                            "{}: can't check {} in your mods folder ({err}), so Silo left it there.",
+                            row.tech_name, row.file_name
+                        ));
+                        rep.skipped += 1;
+                    }
+                }
             }
         } else {
             // Nothing at the name and not wanted: a crash between linking or unlinking and

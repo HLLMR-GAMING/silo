@@ -2,7 +2,7 @@
 // organize summary both the setup flow and the Organize dialog show.
 //   const which = firstRunScreen(await firstRunState());   // "onboarding" | "whatsNew" | null
 import { invoke } from "@tauri-apps/api/core";
-import type { PlannedMove } from "../types";
+import type { ModInput, PlannedMove } from "../types";
 import { formatCount, plural } from "../plural";
 import type { ModsRootStatus } from "../api";
 
@@ -76,6 +76,59 @@ export function filingFailures(errors: string[], plan: PlannedMove[]): FilingFai
     if (mv) return { techName: tech, fileName: mv.fileName, message: line.slice(i + 2) };
     return { techName: "", fileName: "", message: line };
   });
+}
+
+/**
+ * What to file for `plan`, after a scan since the preview (#427). A planned mod still loose is
+ * filed as it is now. One the scan no longer finds loose, whose file isn't in the library either,
+ * is passed on as previewed, so the backend checks the disk and says whether it's gone or why it
+ * can't tell: a scan that couldn't read a folder leaves mods out that aren't gone. One whose file
+ * is in the library now is left out (filed since).
+ * @param loose fileable now, by tech name; @param planned the preview's inputs, by tech name
+ * @param filedFiles file names in the library now
+ */
+export function filingInputs(
+  plan: PlannedMove[],
+  loose: Map<string, ModInput>,
+  planned: Map<string, ModInput>,
+  filedFiles: Set<string>,
+): ModInput[] {
+  const out: ModInput[] = [];
+  for (const p of plan) {
+    const now = loose.get(p.techName);
+    if (now) out.push(now);
+    else if (!filedFiles.has(p.fileName))
+      out.push(
+        planned.get(p.techName) ?? {
+          techName: p.techName,
+          fileName: p.fileName,
+          kind: "zip",
+          category: p.category,
+          subcategory: null,
+        },
+      );
+  }
+  return out;
+}
+
+/**
+ * After a run that stopped partway (a later batch threw): each submitted input that never reached
+ * apply_organize (from `done` on, in submission order) and wasn't already reported, as a failure
+ * with `why`. Judged from the batches, not from a rescan, which can fail or miss files: a file
+ * filed before the throw is never listed, one the scan missed is still accounted for.
+ * @param done inputs handed to apply_organize before the throw (FilingRun.done)
+ */
+export function unfinishedFailures(
+  submitted: ModInput[],
+  done: number,
+  reported: FilingFailure[],
+  why: string,
+): FilingFailure[] {
+  const listed = new Set(reported.map((f) => f.techName));
+  return submitted
+    .slice(done)
+    .filter((i) => !listed.has(i.techName))
+    .map((i) => ({ techName: i.techName, fileName: i.fileName, message: why }));
 }
 
 /** How filing went: refused (another change is running; the app said why) or done. */

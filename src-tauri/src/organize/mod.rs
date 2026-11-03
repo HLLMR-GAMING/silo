@@ -172,6 +172,10 @@ pub struct Report {
     /// already in the mods folder (#421). Not an error: the name is on through that copy. The
     /// Library rescans when it doesn't show that copy yet.
     pub other_copies: Vec<String>,
+    /// Problems `set_active_touched` found with mods the change didn't touch (a file at a
+    /// wanted mod's name that isn't Silo's copy). Already listed in Diagnose → Problems, so
+    /// the change's result doesn't repeat them.
+    pub standing: Vec<String>,
 }
 
 /// Result of the link-repair pass — how many copy-projections were deduped into links

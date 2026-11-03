@@ -434,8 +434,10 @@ export function verifyMod(
   return invoke<VerifyResult>("verify_mod", { techName, version, path });
 }
 
-export function setActive(active: string[]): Promise<OrganizeReport> {
-  return invoke<OrganizeReport>("set_active", { root: null, active });
+/** `touched`: the mods this change turns on or off. A problem with another mod that the change
+ *  didn't cause comes back in `standing`, not `errors` (#427). */
+export function setActive(active: string[], touched?: string[]): Promise<OrganizeReport> {
+  return invoke<OrganizeReport>("set_active", { root: null, active, touched: touched ?? null });
 }
 
 export function flatten(): Promise<OrganizeReport> {

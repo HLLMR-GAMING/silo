@@ -97,7 +97,7 @@
           <li><span class="fn">{f.fileName || f.techName || "A mod"}</span>: {f.message}</li>
         {/each}
       </ul>
-      <p class="muted">The rest are in your library. The ones above are still in your mods folder.</p>
+      <p class="muted">The rest are in your library. Silo moved none of the ones above.</p>
     </div>
     <details class="files" bind:open={filesOpen}>
       <summary>See every file</summary>

@@ -210,7 +210,7 @@
   import { onOtherDrive, runBulkSwitch } from "./lib/components/library/bulkSwitch";
   import { focusInside, returnFocusWhenHidden } from "./lib/components/library/focusReturn.svelte";
   import { fixedOnText, isUnparkable, parkPlan, readyAfterFiling, stillOn } from "./lib/parkable";
-  import { activeTechNames, copiesMayHaveMoved, rowActive, shadowedCopies, shadowedText } from "./lib/shadowedCopies";
+  import { activeTechNames, rowActive, shadowedCopies, shadowedText, switchNeedsReread } from "./lib/shadowedCopies";
   import { createParkLooseExplainer } from "./lib/components/library/parkLoose";
   import BulkBar from "./lib/components/library/BulkBar.svelte";
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
@@ -259,6 +259,8 @@
     fileInRuns,
     relinkFiled,
     filingFailures,
+    filingInputs,
+    unfinishedFailures,
     firstRunScreen,
     firstRunState,
     nMods,
@@ -987,12 +989,15 @@
     const next = new Set(techNames);
     activeSet = next; // optimistic: the Library shows the new set at once
     let errors: number | null = null; // null: set_active threw
-    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
+    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421), or a standing problem turned up (#427)
     try {
       try {
-        const rep = await applyActive(techNames);
+        // Only the mods this switch turns on or off: a standing problem with another one is
+        // Diagnose's to show, not this switch's result (#427).
+        const touched = [...next].filter((t) => !before.has(t)).concat([...before].filter((t) => !next.has(t)));
+        const rep = await applyActive(techNames, touched);
         errors = rep.errors.length;
-        recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
+        recheck = switchNeedsReread(rep, shadowed);
       } catch (e) {
         // Taken as nothing applied: put the set back (unless something else set it since).
         if (activeSet === next) activeSet = before;
@@ -1170,8 +1175,8 @@
   // Apply an active set and surface any warnings the projection engine reports — e.g. it
   // refused to remove a file you'd swapped in at a mod's name. These come back in the
   // report, not as a thrown error, so a plain `await setActive` would drop them silently.
-  async function applyActive(techNames: string[]) {
-    const rep = await setActive(techNames);
+  async function applyActive(techNames: string[], touched?: string[]) {
+    const rep = await setActive(techNames, touched);
     if (rep.errors.length) errorMsg = rep.errors.slice(0, 3).join("; ");
     if (rep.notices?.length) infoMsg = rep.notices.join(" ");
     return rep;
@@ -1354,13 +1359,14 @@
     else next.add(techName);
     activeSet = next; // optimistic: the switch moves at once
     let errors: number | null = null; // null: set_active threw
-    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
+    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421), or a standing problem turned up (#427)
     let keptParked: boolean = false; // set_active left this copy parked for another one (#421)
     try {
       try {
-        const rep = await applyActive([...next]);
+        // Only this mod's problems are the switch's; others are Diagnose's to show (#427).
+        const rep = await applyActive([...next], [techName]);
         errors = rep.errors.length;
-        recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
+        recheck = switchNeedsReread(rep, shadowed);
         keptParked = !turningOff && (rep.otherCopies ?? []).includes(techName);
       } catch (e) {
         // Taken as nothing applied: put the switch back (unless something else set the mods since).
@@ -1563,14 +1569,21 @@
    * problems come back as failures (shown in place, and logged to the activity list); a thrown
    * error (the game is running, the library is busy) is reported as usual and every planned mod
    * still loose counts as not moved.
+   * @param planned the inputs the plan was made from
    * @returns refused, or the mods that couldn't be filed
    */
   async function fileWithProgress(
     plan: PlannedMove[],
+    planned: ModInput[],
     onProgress: (done: number, total: number) => void,
   ): Promise<OrganizeOutcome> {
-    const wanted = new Set(plan.map((p) => p.techName));
-    const inputs = looseInputs().inputs.filter((i) => wanted.has(i.techName));
+    const loose = new Map(looseInputs().inputs.map((i) => [i.techName, i]));
+    const filedFiles = new Set(effectiveMods.filter((m) => m.organized).map((m) => fileName(m.path)));
+    const inputs = filingInputs(plan, loose, new Map(planned.map((i) => [i.techName, i])), filedFiles);
+    // Every planned file is in the library now (filed since the preview): nothing left to do.
+    if (inputs.length === 0) return { failures: [], filed: 0 };
+    // Every planned mod is a loose one, so active: keep active whichever get filed, including
+    // one the scan missed (one that's gone isn't filed, and set_active ignores its name).
     const out = await fileLoose(
       inputs,
       inputs.map((i) => i.techName),
@@ -1583,11 +1596,7 @@
       // Shown in place (the dialog or the setup flow), and kept in the activity list.
       const why = inlineError(out.thrown, "Filing mods into the library");
       if (out.changed === 0) return { refused: true, message: why };
-      const listed = new Set(failures.map((f) => f.techName));
-      const loose = new Set(looseInputs().techNames);
-      for (const p of plan)
-        if (loose.has(p.techName) && !listed.has(p.techName))
-          failures.push({ techName: p.techName, fileName: p.fileName, message: why });
+      failures.push(...unfinishedFailures(inputs, out.done, failures, why));
     } else if (failures.length) {
       reportError(out.errors.join("\n"), "Filing mods into the library", { quiet: true });
     }
@@ -1654,9 +1663,9 @@
       if (problem !== null) reportError(problem, "Filing mods from the archive folder");
       return;
     }
-    const { plan } = organizePreview;
+    const { plan, inputs: planned } = organizePreview;
     organizePreview = { ...organizePreview, applying: true, progress: { done: 0, total: plan.length } };
-    const out = await fileWithProgress(plan, (done, total) => {
+    const out = await fileWithProgress(plan, planned, (done, total) => {
       if (organizePreview) organizePreview = { ...organizePreview, progress: { done, total } };
     });
     if (out.refused) {
@@ -1678,8 +1687,10 @@
     }
     organizePreview = null;
     // The filed mods couldn't be linked back: that problem was reported instead.
-    if (!out.relinkFailed)
-      success(`Filed ${modsCount(out.filed)} into your library. All active mods stay active.`);
+    if (out.relinkFailed) return;
+    // Filed since the preview (the auto-filer, say): say so rather than "Filed 0 mods".
+    if (out.filed === 0) success("Those mods are already in your library.");
+    else success(`Filed ${modsCount(out.filed)} into your library. All active mods stay active.`);
   }
 
   // ── First run (#250): the setup flow for a new library, "What's new" for an upgrade ─────
@@ -1774,8 +1785,12 @@
 
   /** The setup flow's dry run, kept for filing (so failures can name their files). */
   let firstRunPlan: PlannedMove[] = [];
+  /** The inputs firstRunPlan was made from. */
+  let firstRunInputs: ModInput[] = [];
   async function planFirstRun(): Promise<PlannedMove[]> {
-    firstRunPlan = await planOrganize(looseInputs().inputs);
+    const { inputs } = looseInputs();
+    firstRunPlan = await planOrganize(inputs);
+    firstRunInputs = inputs;
     return firstRunPlan;
   }
 
@@ -1787,6 +1802,7 @@
     const wanted = new Set(techNames);
     const out = await fileWithProgress(
       firstRunPlan.filter((p) => wanted.has(p.techName)),
+      firstRunInputs,
       onProgress,
     );
     if (!out.refused) {
@@ -2773,7 +2789,8 @@
         let clean = true;
         let otherCopies: string[] = []; // names set_active left parked for another copy (#421)
         try {
-          const rep = await applyActive([...next]); // reports its own problems
+          // Reports its own problems: only these mods' (#427).
+          const rep = await applyActive([...next], techNames);
           clean = rep.errors.length === 0;
           otherCopies = rep.otherCopies ?? [];
         } catch (e) {

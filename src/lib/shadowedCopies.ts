@@ -70,6 +70,22 @@ export function copiesMayHaveMoved(
 }
 
 /**
+ * A switch's reason to read the mods folder again before letting go of the write, besides
+ * errors: a copy of a name may have come or gone ([`copiesMayHaveMoved`]), or set_active found a
+ * standing problem with a mod the switch didn't touch (`standing`, #427). That one isn't the
+ * switch's to report, but it may be new since the last scan, so Diagnose → Problems and the
+ * rows need the fresh read to show it.
+ * @param rep what set_active reported
+ * @param shadowed from shadowedCopies(mods)
+ */
+export function switchNeedsReread(
+  rep: { otherCopies?: readonly string[]; standing?: readonly string[] },
+  shadowed: ReadonlyMap<string, unknown>,
+): boolean {
+  return copiesMayHaveMoved(rep.otherCopies, shadowed) || (rep.standing ?? []).length > 0;
+}
+
+/**
  * Why a shadowed copy can't be turned on, for the refusal toast.
  * @param name the row's title
  * @param other the file or folder name of the copy in the mods folder, or null when the Library
