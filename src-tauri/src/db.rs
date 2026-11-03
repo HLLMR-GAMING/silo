@@ -1556,11 +1556,13 @@ pub fn drop_library_row(
         rusqlite::params![root, tech_name],
     )
     .map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
-        rusqlite::params![root, file_name],
-    )
-    .map_err(|e| e.to_string())?;
+    for table in ["projection", "foreign_mark"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE root = ?1 AND file_name = ?2"),
+            rusqlite::params![root, file_name],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -1606,13 +1608,33 @@ pub fn projection_src_stats(conn: &Connection, root: &str, file_name: &str) -> O
 }
 
 /// Note that the entry at `file_name`, with `(size, mtime_ms)`, isn't Silo's copy (a hash said
-/// so), so the scan shows it as the file it is.
-pub fn mark_foreign(conn: &Connection, root: &str, file_name: &str, size: u64, mtime_ms: i64) {
-    let _ = conn.execute(
+/// so), so the scan shows it as the file it is. True when the note is new or changed (written
+/// now); false when it was already there as it is, or couldn't be written.
+pub fn mark_foreign(
+    conn: &Connection,
+    root: &str,
+    file_name: &str,
+    size: u64,
+    mtime_ms: i64,
+) -> bool {
+    conn.execute(
         "INSERT INTO foreign_mark(root, file_name, size, mtime_ms) VALUES(?1, ?2, ?3, ?4)
-         ON CONFLICT(root, file_name) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms",
+         ON CONFLICT(root, file_name) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms
+         WHERE size != excluded.size OR mtime_ms != excluded.mtime_ms",
         rusqlite::params![root, file_name, size as i64, mtime_ms],
-    );
+    )
+    .is_ok_and(|n| n > 0)
+}
+
+/// Whether Silo keeps a projection record or a foreign-file note for `file_name`.
+pub fn has_link_record(conn: &Connection, root: &str, file_name: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection WHERE root = ?1 AND file_name = ?2)
+             OR EXISTS(SELECT 1 FROM foreign_mark WHERE root = ?1 AND file_name = ?2)",
+        rusqlite::params![root, file_name],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
 }
 
 /// Drop the note that the entry at `file_name` isn't Silo's.
@@ -1715,12 +1737,14 @@ pub fn reconcile_organized(
         if !keep.contains(existing.tech_name.as_str()) {
             delete_organized(&tx, root, &existing.tech_name)?;
             // Its projection record goes too: left behind, it could vouch for whatever is put
-            // at that name later (#429).
-            tx.execute(
-                "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
-                rusqlite::params![root, existing.file_name],
-            )
-            .map_err(|e| e.to_string())?;
+            // at that name later (#429). So does any foreign-file note.
+            for table in ["projection", "foreign_mark"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE root = ?1 AND file_name = ?2"),
+                    rusqlite::params![root, existing.file_name],
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
     }
     for row in desired {
@@ -2370,6 +2394,14 @@ mod tests {
         mark_foreign(&conn, "m", "FS25_B.zip", 5, 500);
         forget_projection(&conn, "m", "FS25_B.zip");
         assert!(!load_link_records(&conn, "m").contains_key("FS25_B.zip"));
+        // A note is written once: the same note again changes nothing; a changed one is written.
+        assert!(mark_foreign(&conn, "m", "FS25_B.zip", 5, 500));
+        assert!(!mark_foreign(&conn, "m", "FS25_B.zip", 5, 500));
+        assert!(mark_foreign(&conn, "m", "FS25_B.zip", 5, 501));
+        assert!(has_link_record(&conn, "m", "FS25_B.zip"));
+        // Dropping the mod's row drops its note too.
+        drop_library_row(&conn, "m", "FS25_B", "FS25_B.zip").unwrap();
+        assert!(!has_link_record(&conn, "m", "FS25_B.zip"));
     }
 
     #[test]

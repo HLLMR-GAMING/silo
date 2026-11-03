@@ -251,6 +251,7 @@ describe("ModHub dropped builds", () => {
     flatVersion: flat,
     managedVersion: managed,
     archiveChanged: false,
+    newlyNoted: false,
   });
 
   it("finds the zip the user saved, once per build", () => {

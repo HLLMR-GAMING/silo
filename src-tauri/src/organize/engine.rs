@@ -325,10 +325,11 @@ pub fn set_active_touched(
             }
         } else {
             // Nothing at the name and not wanted: a crash between linking or unlinking and
-            // recording can leave `active = true`, or a gone projection's record, behind. The
-            // record must never vouch for a file put at that name later. (Read first: most parked
-            // mods have none, and a delete per mod would be a write per mod on every call.)
-            if db::projection_stats(conn, &key, &row.file_name).is_some() {
+            // recording can leave `active = true`, or a gone projection's record (or note),
+            // behind. The record must never vouch for a file put at that name later. (Read first:
+            // most parked mods have none, and a delete per mod would be a write per mod on every
+            // call.)
+            if db::has_link_record(conn, &key, &row.file_name) {
                 db::forget_projection(conn, &key, &row.file_name);
             }
             if row.active {

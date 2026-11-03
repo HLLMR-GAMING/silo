@@ -158,6 +158,7 @@
   import { describeError, formatDetail, isWindowsPlatform, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import { keepConfirmText, removeConfirmText, removedText, removeVerb } from "./lib/removeMods";
   import { copyPlace, duplicateCopies } from "./lib/duplicates";
+  import { noteRescanner } from "./lib/noteRescan";
   import {
     info,
     inlineError,
@@ -1459,8 +1460,15 @@
     if (gen === foreignGen && roots[0] === root) {
       foreignFiles = found;
       foreignChecked = checked;
+      // A file just found not to be Silo's copy still shows as the library's in this scan: one
+      // more scan shows it as itself (#436).
+      noteRescan.checked(found);
     }
   }
+  const noteRescan = noteRescanner(
+    () => scanning,
+    () => void runScan(false),
+  );
 
   // Build the organize inputs for every loose (unorganized) zip currently in view.
   function looseInputs(): { inputs: ModInput[]; techNames: string[] } {
@@ -3805,6 +3813,7 @@
       op.end();
       scanOp = null;
     }
+    noteRescan.scanEnded();
     // Auto-file any mods still loose in the flat root (e.g. freshly downloaded),
     // keeping them active so filing is transparent to the game.
     // Never auto-file mid-move: library writes are refused until the move finishes. Never after

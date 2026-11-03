@@ -270,3 +270,126 @@ fn detect_foreign_notes_an_entry_that_is_not_silos() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A library with one active zip mod, `FS25_Foo`, whose library copy holds `archived`.
+fn foo_library(tag: &str, archived: &[u8]) -> (std::path::PathBuf, Connection, Layout, String) {
+    let root = std::env::temp_dir().join(format!("silo_foreign_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(ARCHIVE).join("Vehicles")).unwrap();
+    let conn = db::open(&root.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&root);
+    let key = crate::modsroot::canonical_key(&root);
+    std::fs::write(root.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"), archived).unwrap();
+    organize_row(&conn, &root, "FS25_Foo", "Vehicles", true);
+    (root, conn, layout, key)
+}
+
+// A record made before version 6 has no library-copy stamp: the first check compares the two
+// copies instead of taking the library's stamp on trust, and keeps reporting a difference.
+#[test]
+fn a_record_without_a_library_stamp_is_checked_before_it_is_trusted() {
+    let (root, conn, layout, key) = foo_library("nostamp", b"build B, saved into the library");
+    let link = root.join("FS25_Foo.zip");
+    std::fs::write(&link, b"build A, linked before the upgrade").unwrap();
+    let (size, mtime) = file_stats(&link).unwrap();
+    db::record_projection(&conn, &key, "FS25_Foo.zip", size, mtime, None);
+    for _ in 0..2 {
+        let found = detect_foreign_projections(&conn, &layout);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].archive_changed);
+        assert_eq!(db::projection_src_stats(&conn, &key, "FS25_Foo.zip"), None);
+    }
+    // The same bytes: Silo's, and the library stamp is recorded from now on.
+    std::fs::write(&link, b"build B, saved into the library").unwrap();
+    let (size, mtime) = file_stats(&link).unwrap();
+    db::record_projection(&conn, &key, "FS25_Foo.zip", size, mtime, None);
+    assert!(detect_foreign_projections(&conn, &layout).is_empty());
+    let src = root.join(ARCHIVE).join("Vehicles/FS25_Foo.zip");
+    assert_eq!(
+        db::projection_src_stats(&conn, &key, "FS25_Foo.zip"),
+        file_stats(&src)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// A check that couldn't read a file proves nothing: no report, no note, and the next check that
+// can read it gives the right answer.
+#[test]
+fn a_read_error_records_nothing() {
+    let (root, conn, layout, key) = foo_library("readerr", b"the archived build");
+    std::fs::write(
+        root.join("FS25_Foo.zip"),
+        b"the user's own, different build",
+    )
+    .unwrap();
+    let locked = |_: &Path, _: &Path, _: &str| -> std::io::Result<bool> {
+        Err(std::io::Error::other("the file is in use"))
+    };
+    assert!(detect_foreign_with(&conn, &layout, locked).is_empty());
+    assert!(!db::load_link_records(&conn, &key).contains_key("FS25_Foo.zip"));
+
+    let found = detect_foreign_projections(&conn, &layout);
+    assert_eq!(found.len(), 1);
+    assert!(
+        found[0].newly_noted,
+        "noted now, so the Library is rescanned once"
+    );
+    assert!(db::load_link_records(&conn, &key)["FS25_Foo.zip"]
+        .foreign
+        .is_some());
+    // Noted already: no second rescan.
+    let found = detect_foreign_projections(&conn, &layout);
+    assert!(found.len() == 1 && !found[0].newly_noted);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// Adopt and restore record what they put at the mod's name right away (stamps of the entry and
+// the library copy, no note), so the rescan right after shows Silo's copy, also when the entry is
+// a copy rather than a hardlink; and a parked mod's name keeps no records.
+#[test]
+fn adopt_and_restore_record_the_entry_right_away() {
+    let (root, conn, layout, key) = foo_library("resolve", b"the archived build");
+    let link = root.join("FS25_Foo.zip");
+    let src = root.join(ARCHIVE).join("Vehicles/FS25_Foo.zip");
+    std::fs::write(&link, b"the user's own, different build").unwrap();
+    detect_foreign_projections(&conn, &layout);
+
+    // Restore by copy (the copy fallback, with its own time).
+    let copy = |from: &Path, to: &Path, _: &str| -> std::io::Result<()> {
+        std::fs::copy(from, to)?;
+        set_mtime(to, 1_700_000_500);
+        Ok(())
+    };
+    restore_projection_with(&conn, &layout, "FS25_Foo.zip", copy).unwrap();
+    let rec = db::load_link_records(&conn, &key)["FS25_Foo.zip"];
+    assert_eq!(rec.stamp, file_stats(&link));
+    assert_eq!(rec.foreign, None);
+    assert_eq!(
+        db::projection_src_stats(&conn, &key, "FS25_Foo.zip"),
+        file_stats(&src)
+    );
+    assert!(detect_foreign_projections(&conn, &layout).is_empty());
+
+    // Adopt a different build: it becomes the library copy and is recorded at once.
+    std::fs::remove_file(&link).unwrap();
+    std::fs::write(&link, b"a build the user wants to keep").unwrap();
+    detect_foreign_projections(&conn, &layout);
+    adopt_foreign(&conn, &layout, "FS25_Foo.zip").unwrap();
+    let rec = db::load_link_records(&conn, &key)["FS25_Foo.zip"];
+    assert_eq!(rec.stamp, file_stats(&link));
+    assert_eq!(rec.foreign, None);
+    assert_eq!(
+        db::projection_src_stats(&conn, &key, "FS25_Foo.zip"),
+        file_stats(&src)
+    );
+
+    // A parked mod: restoring leaves its name empty, and no records.
+    std::fs::remove_file(&link).unwrap();
+    std::fs::write(&link, b"yet another build").unwrap();
+    detect_foreign_projections(&conn, &layout);
+    organize_row(&conn, &root, "FS25_Foo", "Vehicles", false);
+    restore_projection(&conn, &layout, "FS25_Foo.zip").unwrap();
+    assert!(link.symlink_metadata().is_err());
+    assert!(!db::has_link_record(&conn, &key, "FS25_Foo.zip"));
+    let _ = std::fs::remove_dir_all(&root);
+}

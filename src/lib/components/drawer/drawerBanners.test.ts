@@ -33,6 +33,7 @@ const file = (archiveChanged: boolean): ForeignFile => ({
   flatVersion: "1.0.0.0",
   managedVersion: "1.1.0.0",
   archiveChanged,
+  newlyNoted: false,
 });
 
 describe("DrawerBanners: a different build", () => {

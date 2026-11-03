@@ -1661,6 +1661,58 @@ mod layout_tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// #436 end to end: an unrecorded same-size file that isn't Silo's copy shows as the library's
+    /// until the foreign-file check hashes it. The check notes it (newly, so the app rescans),
+    /// and the next scan shows it as the build it is.
+    #[test]
+    fn a_checked_same_size_file_shows_as_itself_on_the_next_scan() {
+        let base = fresh("checked_same_size");
+        let layout = crate::organize::Layout::default_for(&base);
+        let cat = layout.archive.join("Tools");
+        std::fs::create_dir_all(&cat).unwrap();
+        moddesc_zip(&cat.join("FS25_A.zip"), "Version 1");
+        moddesc_zip(&base.join("FS25_A.zip"), "Version 2");
+        let db_dir = fresh("checked_same_size_db");
+        let conn = crate::db::open(&db_dir.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        crate::db::upsert_organized(
+            &conn,
+            &key,
+            &crate::db::OrganizedRow {
+                tech_name: "FS25_A".into(),
+                file_name: "FS25_A.zip".into(),
+                kind: "zip".into(),
+                category: "Tools".into(),
+                subcategory: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        let scan = || {
+            scan_layouts_with(
+                vec![(base.clone(), vec![layout.archive.clone()])],
+                &[crate::db::load_link_records(&conn, &key)],
+                &HashMap::new(),
+                |_, _| {},
+            )
+        };
+        let title = |out: &ScanOutput| out.result.mods.first().and_then(|m| m.title.clone());
+
+        let before = scan();
+        assert!(before.stand_ins.is_empty(), "trusted until it is checked");
+        assert_eq!(title(&before).as_deref(), Some("Version 1"));
+        let found = crate::organize::detect_foreign_projections(&conn, &layout);
+        assert!(found.len() == 1 && found[0].newly_noted, "{found:?}");
+        let after = scan();
+        assert_eq!(after.stand_ins.len(), 1);
+        assert_eq!(title(&after).as_deref(), Some("Version 2"));
+        // The check after that rescan finds the note already there: no further rescan.
+        let again = crate::organize::detect_foreign_projections(&conn, &layout);
+        assert!(again.len() == 1 && !again[0].newly_noted);
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&db_dir);
+    }
+
     /// The other kind of an archived mod's techName (an unpacked folder beside an archived zip)
     /// is not at that mod's file name, so it is its own loose row, also beside a real projection;
     /// the archived mod is active only through its own file name, as `organize` sees it.
