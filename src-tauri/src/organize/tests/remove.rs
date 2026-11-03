@@ -116,20 +116,27 @@ fn removing_an_active_library_mod_parks_it_first() {
 }
 
 #[test]
-fn a_mod_that_cant_be_parked_stays() {
-    // Active, with the user's own different build at its name: parking refuses, so nothing goes.
+fn the_users_own_build_at_its_name_stays_when_the_library_copy_goes() {
+    // Flagged active, but the entry at its name is the user's own different build, not Silo's
+    // link to it: nothing is parked, the library copy goes, and the user's file is untouched.
     let (base, conn, layout, src) = library_with_foo("rm_noprk", false);
     db::set_organized_active(&conn, &key_of(&layout), "FS25_Foo", true).unwrap();
     let theirs = layout.mods.join("FS25_Foo.zip");
     std::fs::write(&theirs, b"the user's own build").unwrap();
-    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &no_bin);
-    assert!(rep.removed.is_empty());
-    assert!(
-        rep.errors[0].starts_with("FS25_Foo: ") && rep.errors[0].ends_with("It wasn't removed."),
-        "{:?}",
-        rep.errors
+    let bin = base.join("bin");
+    let (plan, rep) = remove(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &src)],
+        true,
+        &bin_at(&bin),
     );
-    assert!(src.exists());
+    assert!(
+        !plan.items[0].on,
+        "the entry isn't its copy, so it isn't parked"
+    );
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert!(bin.join("FS25_Foo.zip").is_file());
     assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own build");
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -1006,5 +1013,98 @@ fn a_slot_switched_to_the_spare_while_confirming_refuses_it() {
     assert!(rep.removed.is_empty());
     assert!(!rep.errors.is_empty(), "refused");
     assert!(second.is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Byte-identical library copies of FS25_Foo: the recorded one (Vehicles, `active` as given) and
+/// an unrecorded second (Tools), with the mods-folder entry a hardlink of the second.
+fn foo_linked_to_second(
+    tag: &str,
+    active: bool,
+) -> (PathBuf, Connection, Layout, PathBuf, PathBuf, PathBuf) {
+    let (base, conn, layout, recorded) = library_with_foo(tag, false);
+    db::set_organized_active(&conn, &key_of(&layout), "FS25_Foo", active).unwrap();
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let second = tools.join("FS25_Foo.zip");
+    std::fs::copy(&recorded, &second).unwrap();
+    let slot = layout.mods.join("FS25_Foo.zip");
+    std::fs::hard_link(&second, &slot).unwrap();
+    (base, conn, layout, recorded, second, slot)
+}
+
+#[test]
+fn removing_the_recorded_copy_never_takes_the_loaded_seconds_entry() {
+    for active in [false, true] {
+        let (base, conn, layout, recorded, second, slot) = foo_linked_to_second(
+            if active {
+                "rm_rec_active"
+            } else {
+                "rm_rec_parked"
+            },
+            active,
+        );
+        let k = keeper(&layout, &req("FS25_Foo", &second)).unwrap();
+        let (plan, found) = plan_removal_keeping(
+            &conn,
+            &layout,
+            &[req("FS25_Foo", &recorded)],
+            Some(&k),
+            true,
+        );
+        assert_eq!(found.len(), 1, "{:?}", plan.refused);
+        assert!(
+            !plan.items[0].on,
+            "the entry is the second's, so nothing is parked"
+        );
+        assert_eq!(plan.keep_on, Some(true));
+        let bin = base.join("bin");
+        let rep = carry_out(&conn, &layout, &found, Some(&k), true, &bin_at(&bin));
+        assert!(rep.errors.is_empty(), "active {active}: {:?}", rep.errors);
+        assert!(bin.join("FS25_Foo.zip").is_file(), "the recorded copy went");
+        assert!(
+            second.is_file() && slot.is_file(),
+            "the second and its entry stay"
+        );
+        assert_eq!(
+            crate::scratch::entry_number(&slot),
+            crate::scratch::entry_number(&second)
+        );
+        assert!(db::load_organized(&conn, &key_of(&layout)).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[test]
+fn an_entry_switched_to_the_second_while_confirming_stops_removing_the_recorded_copy() {
+    // Planned with the entry linked to the recorded copy (on: parked first); before it runs the
+    // entry is relinked to the second. Removing the recorded copy now would park the second's
+    // entry, so it's refused and nothing changes.
+    let (base, conn, layout, recorded) = library_with_foo("rm_rec_switch", true);
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let second = tools.join("FS25_Foo.zip");
+    std::fs::copy(&recorded, &second).unwrap();
+    let slot = layout.mods.join("FS25_Foo.zip");
+    let k = keeper(&layout, &req("FS25_Foo", &second)).unwrap();
+    let (plan, found) = plan_removal_keeping(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &recorded)],
+        Some(&k),
+        true,
+    );
+    assert_eq!(found.len(), 1, "{:?}", plan.refused);
+    assert!(plan.items[0].on);
+    std::fs::remove_file(&slot).unwrap();
+    std::fs::hard_link(&second, &slot).unwrap();
+    let rep = carry_out(&conn, &layout, &found, Some(&k), true, &no_bin);
+    assert!(rep.removed.is_empty());
+    assert!(!rep.errors.is_empty(), "refused");
+    assert!(recorded.is_file() && second.is_file());
+    assert_eq!(
+        crate::scratch::entry_number(&slot),
+        crate::scratch::entry_number(&second)
+    );
     let _ = std::fs::remove_dir_all(&base);
 }

@@ -337,20 +337,25 @@ pub fn carry_out(
     }
 
     // Everything again, against what was confirmed: one that changed isn't parked either.
-    let still_confirmed = |p: &Planned, confirmed: &Evidence| -> Result<(), String> {
+    // `parked`: after this pass parked it, `on` is false by design, so only the rest must match.
+    let still_confirmed = |p: &Planned, confirmed: &Evidence, parked: bool| -> Result<(), String> {
         let request = RemoveRequest {
             tech_name: p.tech_name.clone(),
             path: p.path.clone(),
         };
+        let expected = Planned {
+            on: p.on && !parked,
+            ..p.clone()
+        };
         match check(layout, &rows, &request, archive_ok) {
-            Ok((now, evidence)) if now == *p && evidence == *confirmed => Ok(()),
+            Ok((now, evidence)) if now == expected && evidence == *confirmed => Ok(()),
             Ok(_) => Err("it changed since you confirmed, so Silo left it. Try again to remove it as it is now.".into()),
             Err(why) => Err(why),
         }
     };
     let mut ready: Vec<(&Planned, &Evidence, Option<OrganizedRow>, PathBuf)> = Vec::new();
     for (p, confirmed) in planned {
-        match still_confirmed(p, confirmed) {
+        match still_confirmed(p, confirmed, false) {
             Ok(()) => {
                 let request = RemoveRequest {
                     tech_name: p.tech_name.clone(),
@@ -363,13 +368,12 @@ pub fn carry_out(
         }
     }
 
+    // Only the ones whose own copy is what the game loads now (`Planned::on`, checked again
+    // above): never park a name whose entry is another copy.
     let leaving: HashSet<&str> = ready
         .iter()
-        .filter_map(|(_, _, row, _)| {
-            row.as_ref()
-                .filter(|r| r.active)
-                .map(|r| r.tech_name.as_str())
-        })
+        .filter(|(p, _, row, _)| p.on && row.is_some())
+        .map(|(p, _, _, _)| p.tech_name.as_str())
         .collect();
     let mut park_errors: Vec<String> = Vec::new();
     if !leaving.is_empty() {
@@ -387,13 +391,13 @@ pub fn carry_out(
     for (p, confirmed, row, path) in ready {
         let name = p.tech_name.as_str();
         if let Some(row) = &row {
-            if let Err(why) = slot_clear(layout, row, &park_errors) {
+            if let Err(why) = slot_clear(layout, &rows, row, &park_errors) {
                 rep.errors.push(format!("{name}: {why}"));
                 continue;
             }
         }
         // Once more right before it moves: parking, or moving the ones before it, took a while.
-        if let Err(why) = still_confirmed(p, confirmed) {
+        if let Err(why) = still_confirmed(p, confirmed, leaving.contains(p.tech_name.as_str())) {
             rep.errors.push(format!("{name}: {why}"));
             continue;
         }
@@ -475,7 +479,7 @@ fn check(
 ) -> Result<(Planned, Evidence), String> {
     let given = Path::new(&r.path);
     match library_row(layout, rows, r) {
-        Some(row) => check_library(layout, row, r, archive_ok),
+        Some(row) => check_library(layout, rows, row, r, archive_ok),
         // In a category folder of the archive, with no row of its own: a second copy (#423).
         None if given.parent().and_then(Path::parent) == Some(layout.archive.as_path()) => {
             check_archived_copy(layout, rows, r, archive_ok)
@@ -581,6 +585,7 @@ fn check_archived_copy(
 
 fn check_library(
     layout: &Layout,
+    rows: &[OrganizedRow],
     row: &OrganizedRow,
     r: &RemoveRequest,
     archive_ok: bool,
@@ -604,6 +609,15 @@ fn check_library(
             row.file_name
         ));
     }
+    // It's on (and parked first) only if the entry at its name really serves it: another copy of
+    // the mod may be the one there (#423), and parking must never take that one.
+    let on = row.active
+        && slot_serves(layout, rows, &row.file_name, &src, &row.kind).map_err(|e| {
+            format!(
+                "Silo couldn't check whether the game loads {} ({e}), so it left it.",
+                row.file_name
+            )
+        })?;
     Ok((
         Planned {
             tech_name: row.tech_name.clone(),
@@ -611,7 +625,7 @@ fn check_library(
             path: r.path.clone(),
             file_name: row.file_name.clone(),
             kind: row.kind.clone(),
-            on: row.active,
+            on,
         },
         evidence,
     ))
@@ -685,7 +699,12 @@ fn check_loose(
 /// After parking: nothing of Silo's is left at library mod `row`'s name. Parking reported no
 /// problem for it, and the slot is empty, or holds the user's own file (not part of this library
 /// entry). A slot Silo can't inspect refuses.
-fn slot_clear(layout: &Layout, row: &OrganizedRow, park_errors: &[String]) -> Result<(), String> {
+fn slot_clear(
+    layout: &Layout,
+    rows: &[OrganizedRow],
+    row: &OrganizedRow,
+    park_errors: &[String],
+) -> Result<(), String> {
     let prefix = format!("{}: ", row.tech_name);
     if let Some(e) = park_errors.iter().find(|e| e.starts_with(&prefix)) {
         return Err(format!("{} It wasn't removed.", &e[prefix.len()..]));
@@ -698,7 +717,8 @@ fn slot_clear(layout: &Layout, row: &OrganizedRow, park_errors: &[String]) -> Re
             "Silo couldn't check {} in your mods folder ({e}), so it wasn't removed.",
             row.file_name
         )),
-        Ok(_) => match projection_verdict(&link, &src, &row.kind) {
+        // By what the entry serves, identity first: another copy there is left as it is.
+        Ok(_) => match slot_serves(layout, rows, &row.file_name, &src, &row.kind) {
             Ok(false) => Ok(()),
             Ok(true) => Err("Silo couldn't park it first, so it wasn't removed.".into()),
             Err(e) => Err(format!(
