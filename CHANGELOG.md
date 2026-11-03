@@ -9,11 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The installed app no longer blocks its own connection to Silo's core, so every action takes the
+  quick route instead of a slower fallback, and the developer console no longer fills with
+  security-policy errors that could hide real ones. (#425)
 - Turning a mod on or off, or switching several at once, no longer reports another mod's
   standing problem (a file at its name that isn't Silo's copy) as if the change had caused it.
   The result lists only the mods you changed; Diagnose → Problems still lists the rest. (#427)
 - When a mod in the Organize preview is deleted or moved before you confirm, Silo now says it's
   no longer there instead of "Filed 0 mods" with no reason. (#427)
+- A leftover temporary file Silo can't prove it made is now noted in the log once instead of on
+  every scan, and again only if it changes or comes back. (#428)
+- When Browse can't load a mod's picture (the image host is down, say), the card shows its letter
+  placeholder and the details drop the picture, instead of a broken-image icon. (#428)
 
 ## [1.0.4] - 2026-11-02
 
