@@ -12,6 +12,7 @@
     parseRepo,
     canExpand,
     loadCatalogImage,
+    failedIsCurrent,
     browseBadges,
     progressPct,
     type InstallProgressEntry,
@@ -122,7 +123,7 @@
     </div>
     <div class="drawer-body">
       {#if cover}
-        <img class="drawer-img" src={cover} alt="" onerror={() => (cover = "")} />
+        <img class="drawer-img" src={cover} alt="" onerror={(e) => failedIsCurrent(e, cover) && (cover = "")} />
       {/if}
       <dl class="facts">
         {#if d.category}<dt>Category</dt><dd>{d.category}</dd>{/if}

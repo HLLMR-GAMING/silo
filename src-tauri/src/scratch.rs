@@ -860,8 +860,9 @@ pub(crate) fn kept_for(journal: &dyn Journal, paths: &[&Path]) -> Vec<PathBuf> {
 }
 
 /// Log each entry of `dir` whose name looks like Silo scratch (`is_scratch`) but isn't recorded
-/// in the journal: an older version's leftover, or not Silo's at all. Left in place. Each path is
-/// logged once per session (the scan sweeps every time, #428). Returns them all.
+/// in the journal: an older version's leftover, or not Silo's at all. Left in place. A leftover
+/// is noted once while it stays the same (the scan sweeps every time, #428); a new or replaced
+/// one is noted again. Returns them all.
 pub(crate) fn log_unrecorded(
     journal: &dyn Journal,
     dir: &Path,
@@ -873,28 +874,55 @@ pub(crate) fn log_unrecorded(
         for e in rd.flatten() {
             let p = e.path();
             if is_scratch(&e.file_name().to_string_lossy()) && !recorded.contains(&p) {
-                if first_sighting(&p) {
-                    log::warn!(
-                        "left {} in place: it looks like a leftover from an earlier version of \
-                         Silo, and Silo can't prove it made it",
-                        p.display()
-                    );
-                }
                 v.push(p);
             }
         }
     }
+    static NOTED: std::sync::OnceLock<std::sync::Mutex<NotedLeftovers>> =
+        std::sync::OnceLock::new();
+    let fresh = match NOTED.get_or_init(Default::default).lock() {
+        Ok(mut noted) => to_note(&mut noted, dir, &v),
+        Err(_) => v.clone(),
+    };
+    for p in fresh {
+        log::warn!(
+            "left {} in place: it looks like a leftover from an earlier version of Silo, and \
+             Silo can't prove it made it",
+            p.display()
+        );
+    }
     v
 }
 
-/// True the first time `p` is passed in this session.
-fn first_sighting(p: &Path) -> bool {
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
-        std::sync::OnceLock::new();
-    SEEN.get_or_init(Default::default)
-        .lock()
-        .map(|mut s| s.insert(p.to_path_buf()))
-        .unwrap_or(true)
+/// A leftover's size and times, to tell a file that's still there from one put in its place.
+type LeftoverStamp = (
+    u64,
+    Option<std::time::SystemTime>,
+    Option<std::time::SystemTime>,
+);
+
+/// The unrecorded leftovers already noted this session, with how each looked then.
+type NotedLeftovers = std::collections::HashMap<PathBuf, Option<LeftoverStamp>>;
+
+fn leftover_stamp(p: &Path) -> Option<LeftoverStamp> {
+    let m = std::fs::symlink_metadata(p).ok()?;
+    Some((m.len(), m.modified().ok(), m.created().ok()))
+}
+
+/// Which of `found` (the unrecorded leftovers in `dir` now) to note: one not noted yet, or one
+/// that changed since (another file put at its name). A noted one in `dir` that's no longer
+/// found is forgotten, so it's noted again if it comes back.
+fn to_note(noted: &mut NotedLeftovers, dir: &Path, found: &[PathBuf]) -> Vec<PathBuf> {
+    noted.retain(|p, _| p.parent() != Some(dir) || found.contains(p));
+    let mut fresh = Vec::new();
+    for p in found {
+        let now = leftover_stamp(p);
+        if noted.get(p) != Some(&now) {
+            noted.insert(p.clone(), now);
+            fresh.push(p.clone());
+        }
+    }
+    fresh
 }
 
 #[cfg(test)]
@@ -988,10 +1016,56 @@ pub(crate) mod tests {
         let found = log_unrecorded(&j, &b, &|n: &str| n.ends_with(MOVE_OLD));
         assert_eq!(found, vec![legacy.clone()]);
         assert!(legacy.exists(), "logged, never deleted");
-        // Found again on the next sweep (still returned), but noted in the log only once (#428).
+        // Found again on the next sweep: still returned (the log note is to_note's call).
         let again = log_unrecorded(&j, &b, &|n: &str| n.ends_with(MOVE_OLD));
         assert_eq!(again, vec![legacy.clone()]);
-        assert!(!first_sighting(&legacy), "already noted this session");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_leftover_is_noted_once_while_unchanged_and_again_when_new() {
+        let b = base("noted");
+        let other = b.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let p = b.join("FS25_A.zip.part");
+        let q = other.join("FS25_A.zip.part");
+        std::fs::write(&p, b"one").unwrap();
+        std::fs::write(&q, b"one").unwrap();
+        let mut noted = NotedLeftovers::new();
+
+        assert_eq!(
+            to_note(&mut noted, &b, std::slice::from_ref(&p)),
+            vec![p.clone()]
+        );
+        assert!(
+            to_note(&mut noted, &b, std::slice::from_ref(&p)).is_empty(),
+            "unchanged: not again"
+        );
+        // The same name in another folder is another leftover.
+        assert_eq!(
+            to_note(&mut noted, &other, std::slice::from_ref(&q)),
+            vec![q.clone()]
+        );
+        assert!(
+            to_note(&mut noted, &b, std::slice::from_ref(&p)).is_empty(),
+            "the other folder's sweep forgets nothing here"
+        );
+
+        // Replaced between sweeps by a different file: noted again.
+        std::fs::write(&p, b"a different leftover").unwrap();
+        assert_eq!(
+            to_note(&mut noted, &b, std::slice::from_ref(&p)),
+            vec![p.clone()]
+        );
+
+        // Gone, then back: noted again.
+        std::fs::remove_file(&p).unwrap();
+        assert!(to_note(&mut noted, &b, &[]).is_empty());
+        std::fs::write(&p, b"a different leftover").unwrap();
+        assert_eq!(
+            to_note(&mut noted, &b, std::slice::from_ref(&p)),
+            vec![p.clone()]
+        );
         let _ = std::fs::remove_dir_all(&b);
     }
 

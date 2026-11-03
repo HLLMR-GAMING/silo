@@ -17,6 +17,7 @@
     installLabel,
     label,
     loadCatalogImage,
+    failedIsCurrent,
     sourceChip,
     type InstallState,
   } from "../browse";
@@ -80,7 +81,7 @@
   <div class="thumb">
     {#if thumb}
       <!-- Image host unreachable: the letter placeholder, not a broken-image icon (#428). -->
-      <img src={thumb} alt="" loading="lazy" onerror={() => (thumb = "")} />
+      <img src={thumb} alt="" loading="lazy" onerror={(e) => failedIsCurrent(e, thumb) && (thumb = "")} />
     {:else}
       <div class="thumb-fallback" aria-hidden="true">{(m.title || "?").slice(0, 1)}</div>
     {/if}
