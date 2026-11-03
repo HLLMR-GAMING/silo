@@ -881,7 +881,7 @@ pub(crate) fn log_unrecorded(
     static NOTED: std::sync::OnceLock<std::sync::Mutex<NotedLeftovers>> =
         std::sync::OnceLock::new();
     let fresh = match NOTED.get_or_init(Default::default).lock() {
-        Ok(mut noted) => to_note(&mut noted, dir, is_scratch, &v),
+        Ok(mut noted) => to_note(&mut noted, dir, is_scratch, &v, &leftover_stamp),
         Err(_) => v.clone(),
     };
     for p in fresh {
@@ -920,11 +920,13 @@ fn leftover_stamp(p: &Path) -> Option<LeftoverStamp> {
 /// note: one not noted yet, or one that changed since (another file put at its name). A noted one
 /// in `dir` that this sweep would have matched but didn't find is forgotten, so it's noted again
 /// if it comes back. Others (another sweep's kind, another folder) are left as they are.
+/// `stamp` reads how a leftover looks now ([`leftover_stamp`]; a test passes its own).
 fn to_note(
     noted: &mut NotedLeftovers,
     dir: &Path,
     is_scratch: &dyn Fn(&str) -> bool,
     found: &[PathBuf],
+    stamp: &dyn Fn(&Path) -> Option<LeftoverStamp>,
 ) -> Vec<PathBuf> {
     noted.retain(|p, _| {
         let covered = p.parent() == Some(dir)
@@ -934,7 +936,7 @@ fn to_note(
     });
     let mut fresh = Vec::new();
     for p in found {
-        let now = leftover_stamp(p);
+        let now = stamp(p);
         if noted.get(p) != Some(&now) {
             noted.insert(p.clone(), now);
             fresh.push(p.clone());
@@ -1041,6 +1043,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_replacement_with_the_same_size_and_times_is_noted_again() {
+        // Deterministic: only the file number differs between the two looks.
+        let dir = PathBuf::from("mods");
+        let p = dir.join("FS25_A.zip.part");
+        let t = Some(std::time::SystemTime::UNIX_EPOCH);
+        let file = std::cell::Cell::new(1u64);
+        let stamp = |_: &Path| Some((Some((7, file.get())), 3, t, t));
+        let part = |n: &str| n.ends_with(".part");
+        let mut noted = NotedLeftovers::new();
+        let found = std::slice::from_ref(&p);
+        assert_eq!(
+            to_note(&mut noted, &dir, &part, found, &stamp),
+            vec![p.clone()]
+        );
+        assert!(to_note(&mut noted, &dir, &part, found, &stamp).is_empty());
+        file.set(2);
+        assert_eq!(
+            to_note(&mut noted, &dir, &part, found, &stamp),
+            vec![p.clone()]
+        );
+    }
+
+    #[test]
     fn a_leftover_is_noted_once_while_unchanged_and_again_when_new() {
         let b = base("noted");
         let other = b.join("other");
@@ -1055,7 +1080,7 @@ pub(crate) mod tests {
         std::fs::write(&r, b"one").unwrap();
         let mut noted = NotedLeftovers::new();
         let mut sweep = |dir: &Path, kind: &dyn Fn(&str) -> bool, found: &[PathBuf]| {
-            to_note(&mut noted, dir, kind, found)
+            to_note(&mut noted, dir, kind, found, &leftover_stamp)
         };
 
         assert_eq!(sweep(&b, &part, std::slice::from_ref(&p)), vec![p.clone()]);
@@ -1090,8 +1115,10 @@ pub(crate) mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
+        let before = entry_number(&p);
         std::fs::rename(&swap, &p).unwrap();
         assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), modified);
+        assert_ne!(entry_number(&p), before, "a different file now");
         assert_eq!(sweep(&b, &part, std::slice::from_ref(&p)), vec![p.clone()]);
 
         // Gone, then back: noted again.
