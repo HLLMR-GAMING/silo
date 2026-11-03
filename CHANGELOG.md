@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The installed app no longer blocks its own connection to Silo's core, so every action takes the
+  quick route instead of a slower fallback, and the developer console no longer fills with
+  security-policy errors that could hide real ones. (#425)
+
 ## [1.0.4] - 2026-11-02
 
 This release includes a **security fix**: a folder mod could make Silo read files outside the
