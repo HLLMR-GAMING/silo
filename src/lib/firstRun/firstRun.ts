@@ -112,20 +112,22 @@ export function filingInputs(
 }
 
 /**
- * After a run that stopped partway (a later batch threw): each submitted input not already
- * reported and whose file isn't in the library now, as a failure with `why`. Judged by what was
- * submitted, not by what the scan shows loose, so a file the scan missed is still accounted for.
- * @param filedNow file names in the library after the run's rescan
+ * After a run that stopped partway (a later batch threw): each submitted input that never reached
+ * apply_organize (from `done` on, in submission order) and wasn't already reported, as a failure
+ * with `why`. Judged from the batches, not from a rescan, which can fail or miss files: a file
+ * filed before the throw is never listed, one the scan missed is still accounted for.
+ * @param done inputs handed to apply_organize before the throw (FilingRun.done)
  */
 export function unfinishedFailures(
   submitted: ModInput[],
+  done: number,
   reported: FilingFailure[],
-  filedNow: Set<string>,
   why: string,
 ): FilingFailure[] {
   const listed = new Set(reported.map((f) => f.techName));
   return submitted
-    .filter((i) => !listed.has(i.techName) && !filedNow.has(i.fileName))
+    .slice(done)
+    .filter((i) => !listed.has(i.techName))
     .map((i) => ({ techName: i.techName, fileName: i.fileName, message: why }));
 }
 

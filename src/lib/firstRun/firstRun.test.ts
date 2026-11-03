@@ -156,30 +156,38 @@ describe("unfinishedFailures (#427)", () => {
     subcategory: null,
   });
 
-  it("lists every submitted file not filed and not already reported, seen by the scan or not", () => {
+  it("lists the inputs never handed over, minus ones already reported", () => {
     const submitted = ["FS25_A", "FS25_B", "FS25_C", "FS25_D"].map(input);
     const reported = [
-      { techName: "FS25_B", fileName: "FS25_B.zip", message: "move: denied" },
+      { techName: "FS25_D", fileName: "FS25_D.zip", message: "can't check" },
     ];
-    // A was filed; B was reported; C and D weren't reached (D the scan had missed).
-    expect(
-      unfinishedFailures(
-        submitted,
-        reported,
-        new Set(["FS25_A.zip"]),
-        "Stopped: FS25 started",
-      ),
-    ).toEqual([
-      {
-        techName: "FS25_C",
-        fileName: "FS25_C.zip",
-        message: "Stopped: FS25 started",
+    expect(unfinishedFailures(submitted, 2, reported, "Stopped")).toEqual([
+      { techName: "FS25_C", fileName: "FS25_C.zip", message: "Stopped" },
+    ]);
+    expect(unfinishedFailures(submitted, 4, [], "Stopped")).toEqual([]);
+  });
+
+  it("after a later batch throws, lists only the unreached input, whatever a rescan says", async () => {
+    // 26 inputs in runs of 25: the first run files all 25, the second throws before the 26th
+    // (which the scan had missed and was passed on as previewed).
+    const submitted = Array.from({ length: 26 }, (_, i) => input(`FS25_${i}`));
+    let calls = 0;
+    const run = await fileInRuns(
+      submitted,
+      async (batch) => {
+        if (++calls === 2) throw "Farming Simulator 25 started";
+        return { changed: batch.length, errors: [] };
       },
-      {
-        techName: "FS25_D",
-        fileName: "FS25_D.zip",
-        message: "Stopped: FS25 started",
-      },
+      25,
+      () => {},
+    );
+    expect(run).toMatchObject({
+      changed: 25,
+      done: 25,
+      thrown: "Farming Simulator 25 started",
+    });
+    expect(unfinishedFailures(submitted, run.done, [], "Stopped")).toEqual([
+      { techName: "FS25_25", fileName: "FS25_25.zip", message: "Stopped" },
     ]);
   });
 });

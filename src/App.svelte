@@ -1596,8 +1596,7 @@
       // Shown in place (the dialog or the setup flow), and kept in the activity list.
       const why = inlineError(out.thrown, "Filing mods into the library");
       if (out.changed === 0) return { refused: true, message: why };
-      const filedNow = new Set(effectiveMods.filter((m) => m.organized).map((m) => fileName(m.path)));
-      failures.push(...unfinishedFailures(inputs, failures, filedNow, why));
+      failures.push(...unfinishedFailures(inputs, out.done, failures, why));
     } else if (failures.length) {
       reportError(out.errors.join("\n"), "Filing mods into the library", { quiet: true });
     }
