@@ -402,7 +402,7 @@ pub fn carry_out(
             }
         }
         // Once more right before it moves: parking, or moving the ones before it, took a while.
-        if let Err(why) = still_confirmed(p, confirmed, leaving.contains(p.tech_name.as_str())) {
+        if let Err(why) = still_confirmed(p, confirmed, p.on && row.is_some()) {
             rep.errors.push(format!("{name}: {why}"));
             continue;
         }

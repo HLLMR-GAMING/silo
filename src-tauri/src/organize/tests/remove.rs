@@ -1152,3 +1152,43 @@ fn parking_for_a_batch_touches_only_the_mods_being_removed() {
     assert!(second.is_file());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn a_loose_copy_sharing_the_parked_names_isnt_taken_for_the_parked_one() {
+    // Three copies: the recorded one linked in, an unzipped folder of it in the mods folder, and a
+    // second library copy kept. Removing the recorded one parks it; the folder (same name, never
+    // parked) must still pass its own check and go too.
+    let (base, conn, layout, recorded) = library_with_foo("rm_three_copies", true);
+    let folder = layout.mods.join("FS25_Foo");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let kept = tools.join("FS25_Foo.zip");
+    std::fs::write(&kept, b"PK the kept copy").unwrap();
+    let link = layout.mods.join("FS25_Foo.zip");
+    let k = keeper(&layout, &req("FS25_Foo", &kept)).unwrap();
+    let (plan, found) = plan_removal_keeping(
+        &conn,
+        &layout,
+        &[req("FS25_Foo", &recorded), req("FS25_Foo", &folder)],
+        Some(&k),
+        true,
+    );
+    assert_eq!(found.len(), 2, "{:?}", plan.refused);
+    let bin = base.join("bin");
+    let rep = carry_out(&conn, &layout, &found, Some(&k), true, &bin_at(&bin));
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.removed.len(), 2);
+    assert!(
+        link.symlink_metadata().is_err(),
+        "the recorded copy's link is gone"
+    );
+    assert!(!folder.exists() && !recorded.exists());
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        b"PK the kept copy",
+        "the kept copy is unchanged"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
