@@ -484,9 +484,9 @@ fn check_archived_copy(
         Ok(_) => match projection_verdict(&slot, &path, if meta.is_dir() { "dir" } else { "zip" }) {
             Ok(false) => {}
             Ok(true) => {
-                return Err(format!(
+                return Err(
                     "the game loads this copy, through Silo's link in your mods folder, so Silo left it. Keep this one, or park the mod first."
-                ))
+                .into())
             }
             Err(e) => {
                 return Err(format!(
