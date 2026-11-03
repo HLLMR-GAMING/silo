@@ -80,7 +80,8 @@ fn removing_a_parked_library_mod_bins_its_archived_copy_and_drops_its_row() {
         rep.removed,
         vec![Removed {
             tech_name: "FS25_Foo".into(),
-            path: src.to_string_lossy().into_owned()
+            path: src.to_string_lossy().into_owned(),
+            recycled: true,
         }]
     );
     assert_eq!(
@@ -149,33 +150,133 @@ fn a_library_mod_is_refused_while_the_archive_is_unreachable() {
 }
 
 #[test]
-fn a_mod_the_bin_kept_stays_in_the_library_and_one_gone_unconfirmed_leaves_it() {
+fn a_mod_the_bin_kept_stays_in_the_library_and_one_deleted_is_removed_and_said_so() {
     let (base, conn, layout, src) = library_with_foo("rm_bin_outcomes", false);
-    let kept = |_: &Path| Binned::Kept("the Recycle Bin is full".into());
+    let kept = |_: &Path| Binned::Kept("you chose No in Windows' prompt".into());
     let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &kept);
     assert!(rep.removed.is_empty());
     assert_eq!(
         rep.errors,
-        vec!["FS25_Foo: the Recycle Bin is full. It's still in your library, parked.".to_string()]
+        vec![
+            "FS25_Foo: you chose No in Windows' prompt. It's still in your library, parked."
+                .to_string()
+        ]
     );
     assert_eq!(db::load_organized(&conn, &key_of(&layout)).len(), 1);
-    // Gone from its folder without a Recycle Bin record: not reported as removed or as still
-    // parked, and its records go (nothing is left for them to describe).
-    let unsure = |p: &Path| {
+    // Deleted permanently (the user said Yes in Windows' prompt): removed, not recycled, and said.
+    let deleted = |p: &Path| {
         std::fs::remove_file(p).unwrap();
-        Binned::Unsure(
-            "it's gone from its folder, but Silo found no Recycle Bin record for it".into(),
+        Binned::Gone(
+            "Windows deleted it permanently instead of moving it to the Recycle Bin".into(),
         )
     };
-    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &unsure);
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &deleted);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.removed.len(), 1);
+    assert!(!rep.removed[0].recycled);
+    assert_eq!(
+        rep.notices,
+        vec![
+            "FS25_Foo.zip: Windows deleted it permanently instead of moving it to the Recycle Bin."
+                .to_string()
+        ]
+    );
+    assert!(db::load_organized(&conn, &key_of(&layout)).is_empty());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_mod_silo_cant_check_after_the_move_stays_listed() {
+    let (base, conn, layout, src) = library_with_foo("rm_unchecked", false);
+    let unchecked =
+        |_: &Path| Binned::Unchecked("Silo couldn't check where it is now (denied)".into());
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &unchecked);
     assert!(rep.removed.is_empty());
     assert!(
-        rep.errors[0].contains("Look in the Recycle Bin for FS25_Foo.zip"),
+        rep.errors[0].ends_with("It's still listed in your library."),
         "{:?}",
         rep.errors
     );
-    assert!(!rep.errors[0].contains("parked"));
-    assert!(db::load_organized(&conn, &key_of(&layout)).is_empty());
+    assert_eq!(db::load_organized(&conn, &key_of(&layout)).len(), 1);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_later_item_replaced_while_an_earlier_one_moves_is_refused() {
+    let base = temp_dir_for("rm_two_items");
+    let mods = base.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let a = mods.join("FS25_A.zip");
+    let b = mods.join("FS25_B.zip");
+    std::fs::write(&a, b"PK a").unwrap();
+    std::fs::write(&b, b"PK the B you saw").unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let (plan, found) = plan_removal(
+        &conn,
+        &layout,
+        &[req("FS25_A", &a), req("FS25_B", &b)],
+        true,
+    );
+    assert_eq!(plan.items.len(), 2);
+    let bin = base.join("bin");
+    let moved = std::cell::Cell::new(0);
+    // Moving A takes a while; meanwhile B is replaced by another file of the same size.
+    let slow_bin = |p: &Path| {
+        moved.set(moved.get() + 1);
+        assert_eq!(p, a.as_path(), "B must never reach the bin");
+        std::fs::remove_file(&b).unwrap();
+        std::fs::write(&b, b"PK another B, same!").unwrap();
+        bin_at(&bin)(p)
+    };
+    let rep = carry_out(&conn, &layout, &found, true, &slow_bin);
+    assert_eq!(moved.get(), 1);
+    assert_eq!(rep.removed.len(), 1);
+    assert!(
+        rep.errors[0].starts_with("FS25_B: it changed since you confirmed"),
+        "{:?}",
+        rep.errors
+    );
+    assert_eq!(std::fs::read(&b).unwrap(), b"PK another B, same!");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_folder_file_replaced_with_one_of_the_same_size_and_time_is_refused() {
+    let base = temp_dir_for("rm_folder_swap_same");
+    let mods = base.join("mods");
+    let dir = mods.join("FS25_Unzipped");
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("modDesc.xml"), b"<modDesc/>").unwrap();
+    std::fs::write(dir.join("data/a.xml"), b"one").unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let rep = changed_while_confirming(&conn, &layout, &[req("FS25_Unzipped", &dir)], || {
+        let file = dir.join("data/a.xml");
+        let when = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let folder_when = std::fs::metadata(dir.join("data"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let other = dir.join("data/b.tmp");
+        std::fs::write(&other, b"two").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::rename(&other, &file).unwrap();
+        // Put the folder's own time back too, so only the file's identity tells.
+        let _ = std::fs::File::open(dir.join("data")).and_then(|f| f.set_modified(folder_when));
+    });
+    assert!(
+        rep.errors[0].contains("changed since you confirmed"),
+        "{:?}",
+        rep.errors
+    );
+    assert_eq!(std::fs::read(dir.join("data/a.xml")).unwrap(), b"two");
     let _ = std::fs::remove_dir_all(&base);
 }
 

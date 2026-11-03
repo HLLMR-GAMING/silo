@@ -110,11 +110,13 @@ export interface RemovalPlan {
 
 /** What removing mods from the library did (#429). */
 export interface RemoveReport {
-  /** The mods whose file or folder went to the Recycle Bin, as asked for. */
-  removed: { techName: string; path: string }[];
+  /** The mods whose file or folder is gone, as asked for: `recycled` when it's in the Recycle
+   *  Bin, false when Windows deleted it permanently (it asks first) or it wasn't confirmed there. */
+  removed: { techName: string; path: string; recycled: boolean }[];
   /** Why the others didn't, one line each ("FS25_X: …"). */
   errors: string[];
-  /** Anything else to tell (where parking kept an edited copy). */
+  /** Anything else to tell: where parking kept an edited copy, and which were deleted
+   *  permanently instead of recycled. */
   notices: string[];
 }
 

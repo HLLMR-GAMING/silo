@@ -50,9 +50,12 @@ pub struct Evidence {
     kind: &'static str,
     size: u64,
     mtime_ms: u64,
-    listing: Vec<(String, bool, u64, u64)>,
+    listing: Vec<ListedEntry>,
     roots: Vec<(PathBuf, Option<(u64, u64)>)>,
 }
+
+/// One entry under a planned folder: relative path, folder or not, size, time, file number.
+type ListedEntry = (String, bool, u64, u64, (u64, u64));
 
 /// What became of one item the bin was asked to take.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,8 +64,9 @@ pub enum Binned {
     Recycled,
     /// Still where it was; why.
     Kept(String),
-    /// Gone from its folder, but not confirmed in the bin; what's known.
-    Unsure(String),
+    /// Gone from its folder without a Recycle Bin record: deleted permanently (where it can't
+    /// recycle, Windows asks first), or the bin couldn't be read; what's known.
+    Gone(String),
     /// Silo couldn't tell whether it's still there; why.
     Unchecked(String),
 }
@@ -73,6 +77,8 @@ pub enum Binned {
 pub struct Removed {
     pub tech_name: String,
     pub path: String,
+    /// In the Recycle Bin / Trash (false: deleted permanently, or not confirmed in the bin).
+    pub recycled: bool,
 }
 
 /// What carrying out a plan did: what went to the bin, why any didn't (one line each, starting
@@ -161,28 +167,35 @@ pub fn carry_out(
     };
 
     // Everything again, against what was confirmed: one that changed isn't parked either.
-    let mut ready: Vec<(&Planned, Option<OrganizedRow>, PathBuf)> = Vec::new();
-    for (p, confirmed) in planned {
+    let still_confirmed = |p: &Planned, confirmed: &Evidence| -> Result<(), String> {
         let request = RemoveRequest {
             tech_name: p.tech_name.clone(),
             path: p.path.clone(),
         };
         match check(layout, &rows, &request, archive_ok) {
-            Ok((now, evidence)) if now == *p && evidence == *confirmed => {
+            Ok((now, evidence)) if now == *p && evidence == *confirmed => Ok(()),
+            Ok(_) => Err("it changed since you confirmed, so Silo left it. Try again to remove it as it is now.".into()),
+            Err(why) => Err(why),
+        }
+    };
+    let mut ready: Vec<(&Planned, &Evidence, Option<OrganizedRow>, PathBuf)> = Vec::new();
+    for (p, confirmed) in planned {
+        match still_confirmed(p, confirmed) {
+            Ok(()) => {
+                let request = RemoveRequest {
+                    tech_name: p.tech_name.clone(),
+                    path: p.path.clone(),
+                };
                 let row = library_row(layout, &rows, &request).cloned();
-                ready.push((p, row, PathBuf::from(&p.path)));
+                ready.push((p, confirmed, row, PathBuf::from(&p.path)));
             }
-            Ok(_) => rep.errors.push(format!(
-                "{}: it changed since you confirmed, so Silo left it. Try again to remove it as it is now.",
-                p.tech_name
-            )),
             Err(why) => rep.errors.push(format!("{}: {why}", p.tech_name)),
         }
     }
 
     let leaving: HashSet<&str> = ready
         .iter()
-        .filter_map(|(_, row, _)| {
+        .filter_map(|(_, _, row, _)| {
             row.as_ref()
                 .filter(|r| r.active)
                 .map(|r| r.tech_name.as_str())
@@ -201,7 +214,7 @@ pub fn carry_out(
         rep.notices.extend(parked.notices);
     }
 
-    for (p, row, path) in ready {
+    for (p, confirmed, row, path) in ready {
         let name = p.tech_name.as_str();
         if let Some(row) = &row {
             if let Err(why) = slot_clear(layout, row, &park_errors) {
@@ -209,12 +222,18 @@ pub fn carry_out(
                 continue;
             }
         }
+        // Once more right before it moves: parking, or moving the ones before it, took a while.
+        if let Err(why) = still_confirmed(p, confirmed) {
+            rep.errors.push(format!("{name}: {why}"));
+            continue;
+        }
         let gone = match bin(&path) {
             Binned::Recycled => {
                 crate::fslog::changed("trash", &path);
                 rep.removed.push(Removed {
                     tech_name: name.to_string(),
                     path: p.path.clone(),
+                    recycled: true,
                 });
                 true
             }
@@ -227,12 +246,16 @@ pub fn carry_out(
                 rep.errors.push(format!("{name}: {why}.{still}"));
                 false
             }
-            Binned::Unsure(what) => {
-                crate::fslog::changed("trash?", &path);
-                rep.errors.push(format!(
-                    "{name}: {what}. Look in the Recycle Bin for {}.",
-                    p.file_name
-                ));
+            // Gone, as the user chose in Windows' own prompt, or not confirmed in the bin: removed,
+            // and said how.
+            Binned::Gone(what) => {
+                crate::fslog::changed("delete", &path);
+                rep.removed.push(Removed {
+                    tech_name: name.to_string(),
+                    path: p.path.clone(),
+                    recycled: false,
+                });
+                rep.notices.push(format!("{}: {what}.", p.file_name));
                 true
             }
             // Not known to be gone: its records stay, so nothing is lost track of.
@@ -507,6 +530,7 @@ fn evidence_with(
                 m.is_dir(),
                 if m.is_dir() { 0 } else { m.len() },
                 stamp(&m, e.path())?,
+                number(e.path())?,
             ));
         }
     }

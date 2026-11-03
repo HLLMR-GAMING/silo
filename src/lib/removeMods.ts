@@ -21,6 +21,9 @@ export function binName(windows: boolean): string {
 }
 
 const name = (m: RemovingMod) => m.title || m.techName;
+/** Where it can't recycle (a USB or network drive, a full or turned-off bin), Windows asks. */
+const asks = (windows: boolean) =>
+  windows ? " If Windows can't put one there, it asks you before deleting it permanently." : "";
 const what = (m: RemovingMod) => `${m.kind === "dir" ? "folder" : "file"}, ${m.fileName}`;
 
 /**
@@ -33,7 +36,7 @@ export function removeConfirmText(mods: RemovingMod[], windows: boolean): string
   if (mods.length === 1) {
     const m = mods[0];
     const parked = m.on ? " It's on now, so Silo parks it first." : "";
-    return `Remove ${name(m)} from your library? Its ${what(m)}, goes to the ${bin}, so you can restore it from there.${parked}`;
+    return `Remove ${name(m)} from your library? Its ${what(m)}, goes to the ${bin}, so you can restore it from there.${parked}${asks(windows)}`;
   }
   const shown = mods.slice(0, 3).map((m) => `${name(m)} (${m.fileName})`);
   const more = mods.length > 3 ? `, and ${formatCount(mods.length - 3)} more` : "";
@@ -43,7 +46,7 @@ export function removeConfirmText(mods: RemovingMod[], windows: boolean): string
       : on === mods.length
         ? " They're on now, so Silo parks them first."
         : ` ${formatCount(on)} of them ${on === 1 ? "is" : "are"} on now, so Silo parks ${on === 1 ? "it" : "them"} first.`;
-  return `Remove ${formatCount(mods.length)} mods from your library? Their files and folders go to the ${bin}, so you can restore them from there: ${shown.join(", ")}${more}.${parked}`;
+  return `Remove ${formatCount(mods.length)} mods from your library? Their files and folders go to the ${bin}, so you can restore them from there: ${shown.join(", ")}${more}.${parked}${asks(windows)}`;
 }
 
 /** The confirm button's words. */
@@ -52,14 +55,16 @@ export function removeVerb(windows: boolean): string {
 }
 
 /**
- * The success toast for the mods that went, or null when none did.
+ * The success toast for the mods that went to the bin, or null when none did. (Ones Windows
+ * deleted permanently are told by the report's notices.)
  * @param removed what the command removed (matched by path); @param mods what was asked
  */
 export function removedText(
-  removed: { techName: string; path: string }[],
+  removed: { techName: string; path: string; recycled: boolean }[],
   mods: RemovingMod[],
   windows: boolean,
 ): string | null {
+  removed = removed.filter((r) => r.recycled);
   if (removed.length === 0) return null;
   const bin = binName(windows);
   if (removed.length === 1) {

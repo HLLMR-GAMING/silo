@@ -20,7 +20,7 @@ const zip = (t: string, on = false): RemovingMod => ({
 describe("removeConfirmText", () => {
   it("names one mod, its file, where it goes, and parks it first when it's on", () => {
     expect(removeConfirmText([zip("Tractor", true)], true)).toBe(
-      "Remove Tractor from your library? Its file, FS25_Tractor.zip, goes to the Recycle Bin, so you can restore it from there. It's on now, so Silo parks it first.",
+      "Remove Tractor from your library? Its file, FS25_Tractor.zip, goes to the Recycle Bin, so you can restore it from there. It's on now, so Silo parks it first. If Windows can't put one there, it asks you before deleting it permanently.",
     );
     expect(removeConfirmText([zip("Tractor")], false)).toBe(
       "Remove Tractor from your library? Its file, FS25_Tractor.zip, goes to the Trash, so you can restore it from there.",
@@ -44,7 +44,7 @@ describe("removeConfirmText", () => {
   it("names up to three of several and counts the rest, with how many are on", () => {
     const mods = [zip("A", true), zip("B"), zip("C"), zip("D", true)];
     expect(removeConfirmText(mods, true)).toBe(
-      "Remove 4 mods from your library? Their files and folders go to the Recycle Bin, so you can restore them from there: A (FS25_A.zip), B (FS25_B.zip), C (FS25_C.zip), and 1 more. 2 of them are on now, so Silo parks them first.",
+      "Remove 4 mods from your library? Their files and folders go to the Recycle Bin, so you can restore them from there: A (FS25_A.zip), B (FS25_B.zip), C (FS25_C.zip), and 1 more. 2 of them are on now, so Silo parks them first. If Windows can't put one there, it asks you before deleting it permanently.",
     );
     expect(removeConfirmText([zip("A", true), zip("B", true)], true)).toContain(
       "They're on now, so Silo parks them first.",
@@ -58,7 +58,7 @@ describe("removeConfirmText", () => {
 describe("removedText", () => {
   it("says what went where, or nothing when none went", () => {
     const mods = [zip("A"), zip("B")];
-    const went = (m: RemovingMod) => ({ techName: m.techName, path: m.path });
+    const went = (m: RemovingMod) => ({ techName: m.techName, path: m.path, recycled: true });
     expect(removedText([went(mods[0])], mods, true)).toBe("Moved A to the Recycle Bin.");
     expect(removedText(mods.map(went), mods, false)).toBe("Moved 2 mods to the Trash.");
     expect(removedText([], mods, true)).toBeNull();
@@ -67,9 +67,24 @@ describe("removedText", () => {
   it("names the copy that went, by path, when two copies share a tech name (#421)", () => {
     const parked = { ...zip("A"), title: "A (library copy)" };
     const loose = { ...zip("A"), title: "A (folder)", path: "C:/mods/FS25_A", kind: "dir" as const };
-    expect(removedText([{ techName: "FS25_A", path: loose.path }], [parked, loose], true)).toBe(
+    expect(removedText([{ techName: "FS25_A", path: loose.path, recycled: true }], [parked, loose], true)).toBe(
       "Moved A (folder) to the Recycle Bin.",
     );
+  });
+
+  it("leaves ones Windows deleted permanently to the notices", () => {
+    const mods = [zip("A"), zip("B")];
+    expect(removedText([{ techName: "FS25_A", path: mods[0].path, recycled: false }], mods, true)).toBeNull();
+    expect(
+      removedText(
+        [
+          { techName: "FS25_A", path: mods[0].path, recycled: false },
+          { techName: "FS25_B", path: mods[1].path, recycled: true },
+        ],
+        mods,
+        true,
+      ),
+    ).toBe("Moved B to the Recycle Bin.");
   });
 
   it("labels the bin and the button by platform", () => {
