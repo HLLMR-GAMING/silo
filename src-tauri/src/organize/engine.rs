@@ -392,6 +392,9 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     // The archive entry of each mod this pass reported by name and may have left in the archive
     // (and whether it's a folder mod): its files aren't unrecognized (#410).
     let mut reported: Vec<(PathBuf, bool)> = Vec::new();
+    // Each tech name's copies in the mods folder by entry name, read once the first restore is
+    // due, and kept up to date with what this pass restores.
+    let mut in_root: Option<std::collections::HashMap<String, HashSet<String>>> = None;
     for row in db::load_organized(conn, &key) {
         categories.insert(row.category.clone());
         let link = root.join(&row.file_name);
@@ -437,7 +440,37 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
                     }
                 }
             }
+            // Another copy of this tech name in the mods folder (an unzipped folder beside it) is
+            // the one the game loads: putting this one back would make two. Leave it in the
+            // library, filed and parked, and say so (#423).
+            let copies = in_root.get_or_insert_with(|| crate::scan::root_entries_by_tech(root));
+            let other = copies
+                .get(&row.tech_name)
+                .and_then(|names| names.iter().find(|n| **n != row.file_name).cloned());
+            if let Some(other) = other {
+                rep.notices.push(format!(
+                    "{}: another copy of this mod, {other}, is in your mods folder, and the game loads only one, so Silo left {} in your library. To put it back, move {other} out of your mods folder and undo organizing again.",
+                    row.tech_name, row.file_name
+                ));
+                if let Some(kept) = &kept {
+                    rep.notices
+                        .push(kept_copy_notice(&row.file_name, kept, false));
+                }
+                if row.active {
+                    let _ = db::set_organized_active(conn, &key, &row.tech_name, false);
+                }
+                db::forget_projection(conn, &key, &row.file_name);
+                rep.skipped += 1;
+                reported.push((src, is_dir));
+                continue;
+            }
             let restored = move_path(&src, &link);
+            if restored.is_ok() {
+                copies
+                    .entry(row.tech_name.clone())
+                    .or_default()
+                    .insert(row.file_name.clone());
+            }
             if let Some(kept) = &kept {
                 rep.notices
                     .push(kept_copy_notice(&row.file_name, kept, restored.is_ok()));

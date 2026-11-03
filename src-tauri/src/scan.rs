@@ -222,6 +222,20 @@ pub fn root_tech_names(root: &Path) -> HashSet<String> {
         .collect()
 }
 
+/// [`root_tech_names`] with the entry name (file or folder) of each copy, so a caller can tell
+/// another copy of a tech name from the one at a given name.
+pub fn root_entries_by_tech(root: &Path) -> std::collections::HashMap<String, HashSet<String>> {
+    let mut out: std::collections::HashMap<String, HashSet<String>> = Default::default();
+    for c in collect_root_candidates(root) {
+        if let Some(name) = c.path.file_name() {
+            out.entry(c.tech_name)
+                .or_default()
+                .insert(name.to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
 /// Mods parked in an archive folder's `<Category>/` subfolders (Silo-managed, one level of folders).
 fn collect_archive_candidates(archive: &Path) -> Vec<Candidate> {
     let mut out = Vec::new();

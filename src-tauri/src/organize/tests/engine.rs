@@ -1366,3 +1366,60 @@ fn a_foreign_file_at_an_untouched_mods_name_is_standing_not_an_error() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// #423: Undo organizing never puts a zip back beside another copy of its tech name (an unzipped
+// folder of the same mod): the game would load one of two. The zip stays in the library, parked,
+// and the result says why; without that copy it's restored as usual.
+#[test]
+fn undo_organizing_leaves_a_zip_whose_name_another_copy_holds() {
+    let base = temp_dir_for("undo_twin");
+    std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let key = crate::modsroot::canonical_key(&base);
+    let layout = Layout::default_for(&base);
+    let src = base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip");
+    std::fs::write(&src, b"PK\x03\x04 Foo").unwrap();
+    organize_row(&conn, &base, "FS25_Foo", "Vehicles", false);
+    // Linked while it was the only copy, then the folder came.
+    let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+    assert!(set_active(&conn, &layout, &on).errors.is_empty());
+    assert!(base.join("FS25_Foo.zip").exists());
+    let folder = base.join("FS25_Foo");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+
+    let rep = flatten(&conn, &layout);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.notices.len(), 1, "{:?}", rep.notices);
+    assert!(rep.notices[0].starts_with(
+        "FS25_Foo: another copy of this mod, FS25_Foo, is in your mods folder, and the game loads only one, so Silo left FS25_Foo.zip in your library."
+    ));
+    assert!(src.is_file(), "still in the library");
+    assert!(
+        base.join("FS25_Foo.zip").symlink_metadata().is_err(),
+        "its link is gone, nothing put back"
+    );
+    let rows = db::load_organized(&conn, &key);
+    assert_eq!(rows.len(), 1, "still filed");
+    assert!(!rows[0].active, "parked");
+    assert!(
+        folder.join("modDesc.xml").is_file(),
+        "the folder is left as it is"
+    );
+
+    // Without the other copy, Undo organizing puts it back as usual.
+    std::fs::remove_dir_all(&folder).unwrap();
+    let rep = flatten(&conn, &layout);
+    assert!(
+        rep.errors.is_empty() && rep.notices.is_empty(),
+        "{:?} {:?}",
+        rep.errors,
+        rep.notices
+    );
+    assert_eq!(
+        std::fs::read(base.join("FS25_Foo.zip")).unwrap(),
+        b"PK\x03\x04 Foo"
+    );
+    assert!(db::load_organized(&conn, &key).is_empty());
+    let _ = std::fs::remove_dir_all(&base);
+}
