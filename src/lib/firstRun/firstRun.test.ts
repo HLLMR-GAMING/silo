@@ -5,6 +5,7 @@ import {
   failureDetails,
   fileInRuns,
   filingFailures,
+  vanishedFromPlan,
   filingProgress,
   firstRunScreen,
   folderUsable,
@@ -69,6 +70,27 @@ describe("groupPlan", () => {
       ["Animals", ["c"]],
       ["Maps", ["b"]],
     ]);
+  });
+});
+
+describe("vanishedFromPlan (#427)", () => {
+  const plan = [mv("FS25_A", "Tractors"), mv("FS25_B", "Maps")];
+  const gone = (t: string) => ({
+    techName: t,
+    fileName: `${t}.zip`,
+    message: "is no longer in your mods folder, so Silo didn't file it.",
+  });
+
+  it("names a planned mod that is neither loose nor filed now", () => {
+    expect(vanishedFromPlan(plan, new Set(["FS25_A"]), new Set())).toEqual([gone("FS25_B")]);
+  });
+
+  it("names every planned mod when none is left", () => {
+    expect(vanishedFromPlan(plan, new Set(), new Set())).toEqual([gone("FS25_A"), gone("FS25_B")]);
+  });
+
+  it("leaves out a mod already in the library and one still loose", () => {
+    expect(vanishedFromPlan(plan, new Set(["FS25_A"]), new Set(["FS25_B"]))).toEqual([]);
   });
 });
 

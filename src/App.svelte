@@ -210,7 +210,7 @@
   import { onOtherDrive, runBulkSwitch } from "./lib/components/library/bulkSwitch";
   import { focusInside, returnFocusWhenHidden } from "./lib/components/library/focusReturn.svelte";
   import { fixedOnText, isUnparkable, parkPlan, readyAfterFiling, stillOn } from "./lib/parkable";
-  import { activeTechNames, copiesMayHaveMoved, rowActive, shadowedCopies, shadowedText } from "./lib/shadowedCopies";
+  import { activeTechNames, rowActive, shadowedCopies, shadowedText, switchNeedsReread } from "./lib/shadowedCopies";
   import { createParkLooseExplainer } from "./lib/components/library/parkLoose";
   import BulkBar from "./lib/components/library/BulkBar.svelte";
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
@@ -259,6 +259,7 @@
     fileInRuns,
     relinkFiled,
     filingFailures,
+    vanishedFromPlan,
     firstRunScreen,
     firstRunState,
     nMods,
@@ -987,7 +988,7 @@
     const next = new Set(techNames);
     activeSet = next; // optimistic: the Library shows the new set at once
     let errors: number | null = null; // null: set_active threw
-    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
+    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421), or a standing problem turned up (#427)
     try {
       try {
         // Only the mods this switch turns on or off: a standing problem with another one is
@@ -995,7 +996,7 @@
         const touched = [...next].filter((t) => !before.has(t)).concat([...before].filter((t) => !next.has(t)));
         const rep = await applyActive(techNames, touched);
         errors = rep.errors.length;
-        recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
+        recheck = switchNeedsReread(rep, shadowed);
       } catch (e) {
         // Taken as nothing applied: put the set back (unless something else set it since).
         if (activeSet === next) activeSet = before;
@@ -1357,14 +1358,14 @@
     else next.add(techName);
     activeSet = next; // optimistic: the switch moves at once
     let errors: number | null = null; // null: set_active threw
-    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421)
+    let recheck: boolean = false; // the rows may show the wrong copy of a name (#421), or a standing problem turned up (#427)
     let keptParked: boolean = false; // set_active left this copy parked for another one (#421)
     try {
       try {
         // Only this mod's problems are the switch's; others are Diagnose's to show (#427).
         const rep = await applyActive([...next], [techName]);
         errors = rep.errors.length;
-        recheck = copiesMayHaveMoved(rep.otherCopies, shadowed);
+        recheck = switchNeedsReread(rep, shadowed);
         keptParked = !turningOff && (rep.otherCopies ?? []).includes(techName);
       } catch (e) {
         // Taken as nothing applied: put the switch back (unless something else set the mods since).
@@ -1575,6 +1576,12 @@
   ): Promise<OrganizeOutcome> {
     const wanted = new Set(plan.map((p) => p.techName));
     const inputs = looseInputs().inputs.filter((i) => wanted.has(i.techName));
+    const gone = vanishedFromPlan(
+      plan,
+      new Set(inputs.map((i) => i.techName)),
+      new Set(effectiveMods.filter((m) => m.organized).map((m) => m.techName)),
+    );
+    if (inputs.length === 0 && gone.length > 0) return { failures: gone, filed: 0 };
     const out = await fileLoose(
       inputs,
       inputs.map((i) => i.techName),
@@ -1582,7 +1589,7 @@
       { onProgress },
     );
     if (!out) return { refused: true };
-    const failures = filingFailures(out.errors, plan);
+    const failures = [...gone, ...filingFailures(out.errors, plan)];
     if (out.thrown !== null) {
       // Shown in place (the dialog or the setup flow), and kept in the activity list.
       const why = inlineError(out.thrown, "Filing mods into the library");
@@ -1593,7 +1600,8 @@
         if (loose.has(p.techName) && !listed.has(p.techName))
           failures.push({ techName: p.techName, fileName: p.fileName, message: why });
     } else if (failures.length) {
-      reportError(out.errors.join("\n"), "Filing mods into the library", { quiet: true });
+      const lines = [...gone.map((f) => `${f.techName}: ${f.fileName} ${f.message}`), ...out.errors];
+      reportError(lines.join("\n"), "Filing mods into the library", { quiet: true });
     }
     return { failures, filed: out.changed, relinkFailed: out.relinkError !== undefined };
   }

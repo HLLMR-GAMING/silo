@@ -8,22 +8,28 @@ use super::*;
 /// junction resolves to `src`; a zip hardlink shares `src`'s file id; a cross-volume copy is
 /// byte-identical to `src`; a copied dir carries our marker. Anything else is NOT ours.
 pub(crate) fn is_silo_projection(link: &Path, src: &Path, kind: &str) -> bool {
-    let Ok(meta) = link.symlink_metadata() else {
-        return false;
-    };
+    projection_verdict(link, src, kind).unwrap_or(false)
+}
+
+/// [`is_silo_projection`], telling "not Silo's" (`Ok(false)`) apart from "couldn't tell"
+/// (`Err`: a file couldn't be inspected or read), so a caller can report the second as the
+/// error it is instead of as a different build.
+pub(crate) fn projection_verdict(link: &Path, src: &Path, kind: &str) -> std::io::Result<bool> {
+    let meta = link.symlink_metadata()?;
     let ft = meta.file_type();
 
     if ft.is_symlink() {
         // Our dir symlink / Windows junction resolves to the archived source.
-        return matches!(
-            (std::fs::canonicalize(link), std::fs::canonicalize(src)),
-            (Ok(a), Ok(b)) if a == b
-        );
+        return Ok(std::fs::canonicalize(link)? == std::fs::canonicalize(src)?);
     }
 
     if kind == "dir" || ft.is_dir() {
         // Copy-fallback directory projection carries our marker; a user's own folder won't.
-        return link.join(SILO_MARKER).is_file();
+        return match link.join(SILO_MARKER).metadata() {
+            Ok(m) => Ok(m.is_file()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        };
     }
 
     // Regular file (zip). Same underlying file id → our hardlink (cheap, the common case).
@@ -32,24 +38,16 @@ pub(crate) fn is_silo_projection(link: &Path, src: &Path, kind: &str) -> bool {
         same_file::Handle::from_path(src),
     ) {
         if a == b {
-            return true;
+            return Ok(true);
         }
     }
     // Distinct files: a cross-volume copy projection is byte-identical to the archive; a
     // user's replacement is not. Cheap size gate first, then a content hash.
-    let (Ok(lm), Ok(sm)) = (std::fs::metadata(link), std::fs::metadata(src)) else {
-        return false;
-    };
-    if lm.len() != sm.len() {
-        return false;
+    if std::fs::metadata(link)?.len() != std::fs::metadata(src)?.len() {
+        return Ok(false);
     }
-    matches!(
-        (
-            crate::provenance::sha256_file(link),
-            crate::provenance::sha256_file(src),
-        ),
-        (Ok(a), Ok(b)) if a == b
-    )
+    let hash = |p: &Path| crate::provenance::sha256_file(p).map_err(std::io::Error::other);
+    Ok(hash(link)? == hash(src)?)
 }
 
 /// A file in the flat root occupying an organized mod's managed name that ISN'T Silo's

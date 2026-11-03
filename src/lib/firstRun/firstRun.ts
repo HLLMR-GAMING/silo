@@ -78,6 +78,22 @@ export function filingFailures(errors: string[], plan: PlannedMove[]): FilingFai
   });
 }
 
+/**
+ * Planned mods a scan since the preview no longer finds loose, and that aren't in the library
+ * either: deleted or moved away. They never reach the backend, so name them here instead of
+ * leaving "Filed 0 mods" or a silent short count (#427).
+ * @param loose tech names fileable now; @param filed tech names already in the library
+ */
+export function vanishedFromPlan(plan: PlannedMove[], loose: Set<string>, filed: Set<string>): FilingFailure[] {
+  return plan
+    .filter((p) => !loose.has(p.techName) && !filed.has(p.techName))
+    .map((p) => ({
+      techName: p.techName,
+      fileName: p.fileName,
+      message: "is no longer in your mods folder, so Silo didn't file it.",
+    }));
+}
+
 /** How filing went: refused (another change is running; the app said why) or done. */
 /** `message`: why nothing was filed, when it was tried and stopped (the game is running…). */
 export type OrganizeOutcome =

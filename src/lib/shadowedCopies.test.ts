@@ -1,6 +1,13 @@
 // Two library rows with one tech name (#421): only the copy in the mods folder shows active.
 import { describe, expect, it } from "vitest";
-import { activeTechNames, copiesMayHaveMoved, rowActive, shadowedCopies, shadowedText } from "./shadowedCopies";
+import {
+  activeTechNames,
+  copiesMayHaveMoved,
+  rowActive,
+  shadowedCopies,
+  shadowedText,
+  switchNeedsReread,
+} from "./shadowedCopies";
 
 const row = (techName: string, path: string, active: boolean) => ({ techName, path, active });
 
@@ -61,6 +68,19 @@ describe("copiesMayHaveMoved", () => {
     // A row is shown shadowed: its other copy may have gone, and set_active then linked it.
     const dup = [archived, loose, other];
     expect(copiesMayHaveMoved([], shadowedCopies(dup))).toBe(true);
+  });
+});
+
+describe("switchNeedsReread", () => {
+  it("rereads for a standing problem the switch didn't report, as for a moved copy", () => {
+    const plain = shadowedCopies([archived, other]);
+    expect(switchNeedsReread({}, plain)).toBe(false);
+    expect(switchNeedsReread({ otherCopies: [], standing: [] }, plain)).toBe(false);
+    // Found with another mod during this switch, maybe new since the last scan (#427).
+    expect(switchNeedsReread({ standing: ["FS25_B: FS25_B.zip in your mods folder isn't Silo's copy"] }, plain)).toBe(
+      true,
+    );
+    expect(switchNeedsReread({ otherCopies: ["FS25_A"] }, plain)).toBe(true);
   });
 });
 
