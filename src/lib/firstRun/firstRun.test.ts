@@ -6,6 +6,7 @@ import {
   fileInRuns,
   filingFailures,
   filingInputs,
+  unfinishedFailures,
   filingProgress,
   firstRunScreen,
   folderUsable,
@@ -143,6 +144,43 @@ describe("filingInputs (#427)", () => {
     expect(
       filingInputs(plan, new Map(), planned, new Set(["FS25_A.zip", "FS25_B"])),
     ).toEqual([input("FS25_B", "Maps")]);
+  });
+});
+
+describe("unfinishedFailures (#427)", () => {
+  const input = (t: string): ModInput => ({
+    techName: t,
+    fileName: `${t}.zip`,
+    kind: "zip",
+    category: "Tractors",
+    subcategory: null,
+  });
+
+  it("lists every submitted file not filed and not already reported, seen by the scan or not", () => {
+    const submitted = ["FS25_A", "FS25_B", "FS25_C", "FS25_D"].map(input);
+    const reported = [
+      { techName: "FS25_B", fileName: "FS25_B.zip", message: "move: denied" },
+    ];
+    // A was filed; B was reported; C and D weren't reached (D the scan had missed).
+    expect(
+      unfinishedFailures(
+        submitted,
+        reported,
+        new Set(["FS25_A.zip"]),
+        "Stopped: FS25 started",
+      ),
+    ).toEqual([
+      {
+        techName: "FS25_C",
+        fileName: "FS25_C.zip",
+        message: "Stopped: FS25 started",
+      },
+      {
+        techName: "FS25_D",
+        fileName: "FS25_D.zip",
+        message: "Stopped: FS25 started",
+      },
+    ]);
   });
 });
 

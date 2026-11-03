@@ -111,6 +111,24 @@ export function filingInputs(
   return out;
 }
 
+/**
+ * After a run that stopped partway (a later batch threw): each submitted input not already
+ * reported and whose file isn't in the library now, as a failure with `why`. Judged by what was
+ * submitted, not by what the scan shows loose, so a file the scan missed is still accounted for.
+ * @param filedNow file names in the library after the run's rescan
+ */
+export function unfinishedFailures(
+  submitted: ModInput[],
+  reported: FilingFailure[],
+  filedNow: Set<string>,
+  why: string,
+): FilingFailure[] {
+  const listed = new Set(reported.map((f) => f.techName));
+  return submitted
+    .filter((i) => !listed.has(i.techName) && !filedNow.has(i.fileName))
+    .map((i) => ({ techName: i.techName, fileName: i.fileName, message: why }));
+}
+
 /** How filing went: refused (another change is running; the app said why) or done. */
 /** `message`: why nothing was filed, when it was tried and stopped (the game is running…). */
 export type OrganizeOutcome =

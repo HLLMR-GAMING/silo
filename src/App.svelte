@@ -260,6 +260,7 @@
     relinkFiled,
     filingFailures,
     filingInputs,
+    unfinishedFailures,
     firstRunScreen,
     firstRunState,
     nMods,
@@ -1581,10 +1582,11 @@
     const inputs = filingInputs(plan, loose, new Map(planned.map((i) => [i.techName, i])), filedFiles);
     // Every planned file is in the library now (filed since the preview): nothing left to do.
     if (inputs.length === 0) return { failures: [], filed: 0 };
+    // Every planned mod is a loose one, so active: keep active whichever get filed, including
+    // one the scan missed (one that's gone isn't filed, and set_active ignores its name).
     const out = await fileLoose(
       inputs,
-      // Keep active only what's still loose: the rest are passed on for the backend to check.
-      inputs.filter((i) => loose.has(i.techName)).map((i) => i.techName),
+      inputs.map((i) => i.techName),
       true,
       { onProgress },
     );
@@ -1594,11 +1596,8 @@
       // Shown in place (the dialog or the setup flow), and kept in the activity list.
       const why = inlineError(out.thrown, "Filing mods into the library");
       if (out.changed === 0) return { refused: true, message: why };
-      const listed = new Set(failures.map((f) => f.techName));
-      const loose = new Set(looseInputs().techNames);
-      for (const p of plan)
-        if (loose.has(p.techName) && !listed.has(p.techName))
-          failures.push({ techName: p.techName, fileName: p.fileName, message: why });
+      const filedNow = new Set(effectiveMods.filter((m) => m.organized).map((m) => fileName(m.path)));
+      failures.push(...unfinishedFailures(inputs, failures, filedNow, why));
     } else if (failures.length) {
       reportError(out.errors.join("\n"), "Filing mods into the library", { quiet: true });
     }
