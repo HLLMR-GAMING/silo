@@ -956,3 +956,55 @@ fn byte_identical_library_copies_tell_the_linked_one_from_the_spare() {
     assert!(plan.items[0].on, "the recorded copy is parked first");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn a_slot_linked_to_the_spare_serves_the_spare_whatever_the_bytes() {
+    // Byte-identical copies, but the mods-folder slot is a hardlink of the second (Tools) copy:
+    // that copy is the loaded one, so it isn't a spare, and the recorded copy isn't loaded.
+    let (base, conn, layout, recorded) = library_with_foo("rm_slot_spare", false);
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let second = tools.join("FS25_Foo.zip");
+    std::fs::copy(&recorded, &second).unwrap();
+    let slot = layout.mods.join("FS25_Foo.zip");
+    std::fs::hard_link(&second, &slot).unwrap();
+    let k = keeper(&layout, &req("FS25_Foo", &recorded)).unwrap();
+    let (plan, found) =
+        plan_removal_keeping(&conn, &layout, &[req("FS25_Foo", &second)], Some(&k), true);
+    assert!(found.is_empty());
+    assert!(
+        plan.refused[0].contains("the game loads this copy"),
+        "{:?}",
+        plan.refused
+    );
+    assert_eq!(
+        plan.keep_on,
+        Some(false),
+        "the recorded copy isn't the loaded one"
+    );
+    assert!(second.is_file() && slot.is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_slot_switched_to_the_spare_while_confirming_refuses_it() {
+    // Planned with the slot linked to the recorded copy (the second is a spare); before it runs
+    // the slot is relinked to the second copy, which is then loaded and must stay.
+    let (base, conn, layout, recorded) = library_with_foo("rm_slot_switch", true);
+    let tools = layout.archive.join("Tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let second = tools.join("FS25_Foo.zip");
+    std::fs::copy(&recorded, &second).unwrap();
+    let slot = layout.mods.join("FS25_Foo.zip");
+    let k = keeper(&layout, &req("FS25_Foo", &recorded)).unwrap();
+    let (plan, found) =
+        plan_removal_keeping(&conn, &layout, &[req("FS25_Foo", &second)], Some(&k), true);
+    assert_eq!(found.len(), 1, "{:?}", plan.refused);
+    std::fs::remove_file(&slot).unwrap();
+    std::fs::hard_link(&second, &slot).unwrap();
+    let rep = carry_out(&conn, &layout, &found, Some(&k), true, &no_bin);
+    assert!(rep.removed.is_empty());
+    assert!(!rep.errors.is_empty(), "refused");
+    assert!(second.is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -160,10 +160,13 @@ pub fn keeper_loaded(layout: &Layout, rows: &[OrganizedRow], k: &Keeper) -> Opti
 }
 
 /// Whether the entry at mod slot `name` in the mods folder serves archived copy `copy` (`kind`):
-/// the game loads `copy` through it. Silo only ever links a mod's recorded copy, so a slot that is
-/// Silo's projection of a recorded copy serves that one, even when another archived copy holds the
-/// same bytes; only a slot that's no recorded copy's projection is judged against `copy` itself.
-/// `Ok(false)` with no slot; `Err` when it can't be told.
+/// the game loads `copy` through it. Decided by what the slot is first: a link resolves to one
+/// file, and a hardlink is one file, so it serves `copy` exactly when that file is `copy`. Only a
+/// slot that's a separate copy (Silo's projection on another drive or a cloud folder, or a marked
+/// folder copy) can't say which archived copy it came from by itself: then, since Silo only ever
+/// projects a mod's recorded copy, one that matches a recorded copy serves that one, even if
+/// `copy` holds the same bytes; otherwise it's judged against `copy`. `Ok(false)` with no slot;
+/// `Err` when it can't be told.
 fn slot_serves(
     layout: &Layout,
     rows: &[OrganizedRow],
@@ -172,26 +175,45 @@ fn slot_serves(
     kind: &str,
 ) -> Result<bool, String> {
     let slot = layout.mods.join(name);
-    match slot.symlink_metadata() {
+    let meta = match slot.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.to_string()),
-        Ok(_) => {}
+        Ok(m) => m,
+    };
+    let unknown = || "Silo couldn't check which file it is".to_string();
+    // A link (symlink, junction): it serves the one file it resolves to.
+    if meta.file_type().is_symlink() {
+        let to = std::fs::canonicalize(&slot).map_err(|e| e.to_string())?;
+        let copy = std::fs::canonicalize(copy).map_err(|e| e.to_string())?;
+        return Ok(to == copy);
     }
+    // A file that is an archived copy under another name (a hardlink): that copy, whichever
+    // category it's in, recorded or not.
+    if meta.is_file() {
+        let here = crate::scratch::entry_number(&slot).ok_or_else(unknown)?;
+        let target = crate::scratch::entry_number(copy).ok_or_else(unknown)?;
+        if here == target {
+            return Ok(true);
+        }
+        let categories = std::fs::read_dir(&layout.archive).map_err(|e| e.to_string())?;
+        for cat in categories {
+            let archived = cat.map_err(|e| e.to_string())?.path().join(name);
+            if archived.symlink_metadata().is_ok_and(|m| m.is_file())
+                && crate::scratch::entry_number(&archived) == Some(here)
+            {
+                return Ok(false); // a hardlink of another archived copy, which isn't `copy`
+            }
+        }
+    }
+    // A separate copy: the recorded copy's projection serves the recorded copy.
+    let target = crate::scratch::entry_number(copy).ok_or_else(unknown)?;
     for row in rows
         .iter()
         .filter(|r| r.file_name.eq_ignore_ascii_case(name))
     {
         let recorded = archive_path(&layout.archive, &row.category, &row.file_name);
         if projection_verdict(&slot, &recorded, &row.kind).map_err(|e| e.to_string())? {
-            // The recorded copy's projection: it serves that copy (which may be `copy` itself).
-            let same = match (
-                crate::scratch::entry_number(&recorded),
-                crate::scratch::entry_number(copy),
-            ) {
-                (Some(a), Some(b)) => a == b,
-                _ => return Err("Silo couldn't check which file it is".into()),
-            };
-            return Ok(same);
+            return Ok(crate::scratch::entry_number(&recorded).ok_or_else(unknown)? == target);
         }
     }
     projection_verdict(&slot, copy, kind).map_err(|e| e.to_string())
