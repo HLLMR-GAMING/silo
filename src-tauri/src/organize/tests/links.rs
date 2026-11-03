@@ -582,7 +582,7 @@ fn relink_across_drives_upgrades_a_copy_to_a_symlink() {
     std::fs::copy(&src, &flat).unwrap();
     let layout = Layout::default_for(&base);
     let key = crate::modsroot::canonical_key(&base);
-    db::record_projection(&conn, &key, "FS25_Foo.zip", 1, 1);
+    db::record_projection(&conn, &key, "FS25_Foo.zip", 1, 1, None);
 
     let rep = relink_with(&conn, &layout, RelinkMode::Symlink, |_, _| {});
     assert_eq!(rep.upgraded, 1, "errors: {:?}", rep.errors);

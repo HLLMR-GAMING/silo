@@ -158,6 +158,7 @@
   import { describeError, formatDetail, isWindowsPlatform, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import { keepConfirmText, removeConfirmText, removedText, removeVerb } from "./lib/removeMods";
   import { copyPlace, duplicateCopies } from "./lib/duplicates";
+  import { foreignChecker } from "./lib/noteRescan";
   import {
     info,
     inlineError,
@@ -334,8 +335,6 @@
   // library" counts are only shown against a library Silo has actually read.
   let libraryScanned = $state(false);
   let foreignFiles = $state<ForeignFile[]>([]);
-  /** Bumped by every foreign-file check and by a folder switch: an older check's answer is dropped. */
-  let foreignGen = 0;
   /** The foreign-file check matches the current scan: until it does, copies at a mod's name
    *  can't be told from foreign files, so Problems lists no duplicates to act on (#423). */
   let foreignChecked = $state(false);
@@ -1448,19 +1447,21 @@
   /**
    * Look for files at a managed name that aren't Silo's projection, in the current mods folder.
    * The answer is dropped when a newer check started or the folder changed meanwhile (#358):
-   * hashing can be slow on a cloud-synced folder, and the old folder's files mustn't show.
+   * hashing can be slow on a cloud-synced folder, and the old folder's files mustn't show. A file
+   * a check just found not to be Silo's copy still shows as the library's in the last scan: one
+   * more scan shows it as itself (#436).
    */
-  async function refreshForeignFiles(): Promise<void> {
-    const gen = ++foreignGen;
-    const root = roots[0];
-    foreignChecked = false;
-    let checked = true;
-    const found = await detectForeignFiles(root).catch(() => ((checked = false), []));
-    if (gen === foreignGen && roots[0] === root) {
+  const foreignCheck = foreignChecker<ForeignFile>({
+    detect: (root) => detectForeignFiles(root),
+    root: () => roots[0],
+    rescan: () => void runScan(false),
+    started: () => (foreignChecked = false),
+    answered: (found, checked) => {
       foreignFiles = found;
       foreignChecked = checked;
-    }
-  }
+    },
+  });
+  const refreshForeignFiles = (): Promise<void> => foreignCheck.refresh();
 
   // Build the organize inputs for every loose (unorganized) zip currently in view.
   function looseInputs(): { inputs: ModInput[]; techNames: string[] } {
@@ -3154,7 +3155,7 @@
     scanSaid = "";
     // The other folder's foreign files: drop a check still running, and its "Use this version"
     // offers (#358).
-    foreignGen++;
+    foreignCheck.drop();
     foreignFiles = [];
     foreignChecked = false;
     for (const t of dropToasts.splice(0)) t.dismiss();
@@ -3742,6 +3743,8 @@
   async function runScan(auto = true, label?: string, heldByCaller = false) {
     if (scanning) return;
     if (!scanGate.admit(auto, heldByCaller)) return; // queued until the write ends
+    // From here to the end, auto-filing included, is one scan cycle (#436).
+    foreignCheck.scanStarted();
     const op = start(label ?? "Rescanning your library", { quiet: !label });
     scanOp = op;
     scanning = true;
@@ -3809,10 +3812,14 @@
     // keeping them active so filing is transparent to the game.
     // Never auto-file mid-move: library writes are refused until the move finishes. Never after
     // a failed scan either: `mods` and `activeSet` are still the last scan's (#358).
-    if (scanned && auto && autoFileNew && !archiveMove.unfinished) {
-      if (mods.some(isFileable)) {
-        await autoFile();
+    try {
+      if (scanned && auto && autoFileNew && !archiveMove.unfinished) {
+        if (mods.some(isFileable)) {
+          await autoFile();
+        }
       }
+    } finally {
+      foreignCheck.scanEnded();
     }
   }
 

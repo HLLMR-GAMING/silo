@@ -117,8 +117,10 @@
   const label = $derived(mod.title ?? mod.techName);
   const uid = $props.id();
 
-  // Is the dropped-in build newer than Silo's managed copy?
+  // Is the dropped-in build newer than Silo's managed copy? (Not a drop when it's the library copy
+  // that changed.)
   const foreignIsNewer = $derived(
+    !foreign?.archiveChanged &&
     !!(foreign?.flatVersion && foreign?.managedVersion
       ? versionNewer(foreign.flatVersion, foreign.managedVersion)
       : foreign?.flatVersion && !foreign?.managedVersion),

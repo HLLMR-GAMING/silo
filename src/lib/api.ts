@@ -298,6 +298,12 @@ export interface ForeignFile {
   flatVersion: string | null;
   /** Version of Silo's managed copy (what "restore" puts back). */
   managedVersion: string | null;
+  /** The mods-folder file is the one Silo put there; it's the library's copy that changed
+   *  since (#431). The same two choices apply. */
+  archiveChanged: boolean;
+  /** This check just noted the file as not Silo's copy, so the scan before it still showed the
+   *  library's copy: a rescan shows the file as itself (#436). */
+  newlyNoted: boolean;
 }
 
 /** Detect files squatting at an organized mod's name that Silo didn't create. */

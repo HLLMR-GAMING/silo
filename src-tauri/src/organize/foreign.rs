@@ -63,6 +63,13 @@ pub struct ForeignFile {
     pub flat_version: Option<String>,
     /// Version of Silo's managed/archived copy (what "restore" would put back).
     pub managed_version: Option<String>,
+    /// The entry is the one Silo linked; it's the copy in the library archive that changed since
+    /// (#431). The choices are the same: keep the mods-folder copy, or put the library's in.
+    pub archive_changed: bool,
+    /// This check just noted the entry as not Silo's copy (new, or changed since the last note),
+    /// so the scan before it still showed the library's copy there: a rescan shows the entry as
+    /// itself (#436).
+    pub newly_noted: bool,
 }
 
 /// Best-effort mod version from a mod's `modDesc.xml`, for showing which build is which.
@@ -77,6 +84,16 @@ fn mod_version(path: &Path, kind: &str) -> Option<String> {
 /// actually present against their archived source. Reuses [`is_silo_projection`], so a real
 /// hardlink/symlink/copy projection is never flagged — only a file Silo can't prove it created.
 pub fn detect_foreign_projections(conn: &Connection, layout: &Layout) -> Vec<ForeignFile> {
+    detect_foreign_with(conn, layout, projection_verdict)
+}
+
+/// [`detect_foreign_projections`] with the ownership check (`projection_verdict`) injected, so
+/// a read error is testable.
+pub(super) fn detect_foreign_with(
+    conn: &Connection,
+    layout: &Layout,
+    verdict: impl Fn(&Path, &Path, &str) -> std::io::Result<bool>,
+) -> Vec<ForeignFile> {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut out = Vec::new();
@@ -99,25 +116,61 @@ pub fn detect_foreign_projections(conn: &Connection, layout: &Layout) -> Vec<For
             continue; // no archived copy to compare against (or to restore)
         }
         let kind = row.kind.as_str();
-        // Fast path: provenance match → provably ours, no hash. Else the careful check (which
-        // hashes a copy). Either way, (re)record provenance for a confirmed zip so the next scan
-        // — and any deactivate — is O(1) instead of re-hashing gigabytes.
-        if matches_provenance(conn, &key, &link, &row.file_name)
-            || is_silo_projection(&link, &src, kind)
-        {
+        // Fast path: provenance match → the entry is the one Silo linked, no hash. Then, for a zip,
+        // the archived copy must still be the one it was linked from (#431): a library copy whose
+        // size or time changed since, or that has no recorded stamp yet (a record from before
+        // version 6), is hashed against the entry, and differs → reported. Else the careful check
+        // (which hashes a copy). Either way, (re)record provenance (with the archived copy's
+        // stamp) for a confirmed zip so the next scan, and any deactivate, is O(1) instead of
+        // re-hashing gigabytes; and note an entry that isn't Silo's copy so the scan shows that
+        // file (#436). A check that couldn't read a file proves nothing: no record, no note, no
+        // report, and the next check tries again.
+        let linked = matches_provenance(conn, &key, &link, &row.file_name);
+        let library_same = linked
+            && (kind != "zip"
+                || db::projection_src_stats(conn, &key, &row.file_name)
+                    .is_some_and(|was| file_stats(&src) == Some(was)));
+        let ours = if library_same {
+            true
+        } else {
+            match verdict(&link, &src, kind) {
+                Ok(ours) => ours,
+                Err(e) => {
+                    log::warn!(
+                        "[foreign] couldn't check {} against the library copy: {e}",
+                        link.display()
+                    );
+                    continue;
+                }
+            }
+        };
+        if ours {
             if kind == "zip" {
                 if let Some((size, mtime)) = file_stats(&link) {
-                    db::record_projection(conn, &key, &row.file_name, size, mtime);
+                    db::record_projection(
+                        conn,
+                        &key,
+                        &row.file_name,
+                        size,
+                        mtime,
+                        file_stats(&src),
+                    );
                 }
             }
             continue;
         }
+        let newly_noted = kind == "zip"
+            && file_stats(&link).is_some_and(|(size, mtime)| {
+                db::mark_foreign(conn, &key, &row.file_name, size, mtime)
+            });
         out.push(ForeignFile {
             flat_version: mod_version(&link, kind),
             managed_version: mod_version(&src, kind),
             tech_name: row.tech_name,
             file_name: row.file_name,
             kind: row.kind,
+            archive_changed: linked,
+            newly_noted,
         });
     }
     out

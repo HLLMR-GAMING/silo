@@ -250,6 +250,8 @@ describe("ModHub dropped builds", () => {
     kind: "zip",
     flatVersion: flat,
     managedVersion: managed,
+    archiveChanged: false,
+    newlyNoted: false,
   });
 
   it("finds the zip the user saved, once per build", () => {
@@ -270,6 +272,11 @@ describe("ModHub dropped builds", () => {
     expect(droppedBuildFor(hub, [file("1.0.0.0", "1.0.2.0")])).toBeNull();
     expect(droppedBuildFor(hub, [file(null)])).toBeNull();
     expect(droppedBuildFor(hub, [{ ...file("2.0"), techName: "Other" }])).toBeNull();
+  });
+
+  it("isn't a drop when the library's copy changed (#431)", () => {
+    // The mods folder still has the build Silo put there; the library has a different one now.
+    expect(droppedBuildFor(hub, [{ ...file("1.0.2.0"), archiveChanged: true }])).toBeNull();
   });
 });
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   // What needs the user's attention, under the primary row: a different build in the mods folder
-  // (use it or keep Silo's), errors in the last game's log, conflicts with active mods. Each has
+  // (use it or keep Silo's) or a library copy changed since it was put there (use it or keep the
+  // mods-folder one), errors in the last game's log, conflicts with active mods. Each has
   // its own action; nothing shows when all is well.
   import Button from "../../ui/Button.svelte";
   import Icon from "../../ui/Icon.svelte";
@@ -52,7 +53,23 @@
 
 {#if foreign || logErrors || partners.length > 0}
   <div class="banners">
-    {#if foreign}
+    {#if foreign?.archiveChanged}
+      <div class="banner info" role="group" aria-label="The library copy changed">
+        <p class="msg">
+          <Icon name="info" size={14} />
+          <b>The copy in your library changed</b>: it's {v(foreign.managedVersion)} now, but your mods folder still has
+          {v(foreign.flatVersion)}, the copy Silo put there before.
+        </p>
+        <div class="row">
+          <Button size="sm" variant="primary" icon="update" onclick={onRestoreForeign}>
+            {foreign.managedVersion ? `Use the library's ${displayVersion(foreign.managedVersion)}` : "Use the library's copy"}
+          </Button>
+          <Button size="sm" onclick={onAdoptForeign}>
+            {foreign.flatVersion ? `Keep ${displayVersion(foreign.flatVersion)}` : "Keep the mods-folder copy"}
+          </Button>
+        </div>
+      </div>
+    {:else if foreign}
       <div class="banner info" role="group" aria-label="A different build">
         <p class="msg">
           <Icon name="info" size={14} />

@@ -178,7 +178,7 @@ describe("Problems", () => {
         corrupt: [entry("FS25_Broken", { error: "invalid zip" })],
         ignored: [entry("1FS25_Digit")],
         foreign: [
-          { techName: "FS25_Plow", fileName: "FS25_Plow.zip", kind: "zip", flatVersion: "1.1.0.0", managedVersion: "1.0.0.0" },
+          { techName: "FS25_Plow", fileName: "FS25_Plow.zip", kind: "zip", flatVersion: "1.1.0.0", managedVersion: "1.0.0.0", archiveChanged: false },
         ],
       },
       isActive: (t: string) => t === "FS25_Broken",
@@ -205,6 +205,28 @@ describe("Problems", () => {
     expect(onResolveForeign).toHaveBeenCalledWith("FS25_Plow.zip", "restore");
     // "Foreign files" is gone from the words.
     expect(screen.queryByText(/foreign/i)).toBeNull();
+  });
+
+  it("a library copy changed since it was put in the mods folder offers the library's (#431)", async () => {
+    const user = userEvent.setup();
+    const onResolveForeign = vi.fn(() => Promise.resolve(true));
+    render(ProblemsPanel, {
+      health: {
+        missingDeps: [],
+        corrupt: [],
+        ignored: [],
+        foreign: [
+          { techName: "FS25_Plow", fileName: "FS25_Plow.zip", kind: "zip", flatVersion: "1.0.0.0", managedVersion: "1.1.0.0", archiveChanged: true },
+        ],
+      },
+      onResolveForeign,
+    });
+    expect(screen.getByText(/The copy in your library changed \(1\.1\.0\.0\) since Silo put 1\.0\.0\.0/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use this version" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Use the library's copy" }));
+    expect(onResolveForeign).toHaveBeenCalledWith("FS25_Plow.zip", "restore");
+    await user.click(screen.getByRole("button", { name: "Keep the mods-folder copy" }));
+    expect(onResolveForeign).toHaveBeenCalledWith("FS25_Plow.zip", "adopt");
   });
 });
 

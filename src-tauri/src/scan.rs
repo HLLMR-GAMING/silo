@@ -602,9 +602,10 @@ fn resolve_entry(
     (build_entry(c), Some(key))
 }
 
-/// What Silo recorded for the zips it projected into one mods folder: file name to the
-/// `(size, mtime_ms)` the entry had when Silo wrote or last confirmed it (`db::load_projections`).
-pub type ProjectionRecords = HashMap<String, (u64, i64)>;
+/// What Silo recorded for the zips at its mods-folder names in one folder (`db::load_link_records`):
+/// file name to the `(size, mtime_ms)` the entry had when Silo wrote or last confirmed it, and when
+/// a hash last showed it isn't Silo's copy.
+pub type ProjectionRecords = HashMap<String, crate::db::LinkRecord>;
 
 /// How sure the scan is that a mods-folder entry is Silo's projection of an archived copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -624,8 +625,15 @@ enum Ownership {
 /// when it is `src` itself (a hardlink); otherwise it must be `src`'s size and, when Silo
 /// recorded the entry (`record`), still carry that size and mtime. A file swapped in by the user
 /// fails one of those; only an unrecorded same-size file passes, on trust, and the foreign-file
-/// check after each scan hashes it (and records it when it is ours).
-fn projection_of(link: &Candidate, src: &Candidate, record: Option<(u64, i64)>) -> Ownership {
+/// check after each scan hashes it (and records it when it is ours). A plain file that check found
+/// isn't Silo's copy, unchanged since (`record.foreign`), is foreign outright (#436).
+fn projection_of(
+    link: &Candidate,
+    src: &Candidate,
+    record: Option<crate::db::LinkRecord>,
+) -> Ownership {
+    let foreign_mark = record.and_then(|r| r.foreign);
+    let record = record.and_then(|r| r.stamp);
     let proven = |yes: bool| {
         if yes {
             Ownership::Proven
@@ -657,6 +665,9 @@ fn projection_of(link: &Candidate, src: &Candidate, record: Option<(u64, i64)>) 
         if a == b {
             return Ownership::Proven;
         }
+    }
+    if foreign_mark == Some(file_stamp(&meta)) {
+        return Ownership::Foreign;
     }
     let same_size = fs::metadata(&src.path)
         .map(|s| s.len() == meta.len())
@@ -1603,7 +1614,7 @@ mod layout_tests {
             fs::metadata(cat.join("FS25_A.zip")).unwrap().len()
         );
         let stamp = file_stamp(&fs::metadata(&flat).unwrap());
-        let scan_rec = |rec: Option<(u64, i64)>| {
+        let scan_link = |rec: Option<crate::db::LinkRecord>| {
             let records: ProjectionRecords = rec
                 .map(|r| HashMap::from([("FS25_A.zip".to_string(), r)]))
                 .unwrap_or_default();
@@ -1613,6 +1624,12 @@ mod layout_tests {
                 &HashMap::new(),
                 |_, _| {},
             )
+        };
+        let scan_rec = |rec: Option<(u64, i64)>| {
+            scan_link(rec.map(|r| crate::db::LinkRecord {
+                stamp: Some(r),
+                foreign: None,
+            }))
         };
 
         let unrecorded = scan_rec(None);
@@ -1626,7 +1643,74 @@ mod layout_tests {
         assert_eq!(swapped.result.mods.len(), 1);
         assert_eq!(swapped.result.mods[0].title.as_deref(), Some("Version 2"));
         assert!(swapped.result.mods[0].active);
+
+        // #436: a hash showed this entry isn't Silo's copy, and it hasn't changed since: shown
+        // as the file it is, with no projection record needed.
+        let marked = scan_link(Some(crate::db::LinkRecord {
+            stamp: None,
+            foreign: Some(stamp),
+        }));
+        assert_eq!(marked.stand_ins.len(), 1);
+        assert_eq!(marked.result.mods[0].title.as_deref(), Some("Version 2"));
+        // Changed since the note: trusted again until the next check hashes it.
+        let stale = scan_link(Some(crate::db::LinkRecord {
+            stamp: None,
+            foreign: Some((stamp.0, stamp.1 - 60_000)),
+        }));
+        assert!(stale.stand_ins.is_empty());
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// #436 end to end: an unrecorded same-size file that isn't Silo's copy shows as the library's
+    /// until the foreign-file check hashes it. The check notes it (newly, so the app rescans),
+    /// and the next scan shows it as the build it is.
+    #[test]
+    fn a_checked_same_size_file_shows_as_itself_on_the_next_scan() {
+        let base = fresh("checked_same_size");
+        let layout = crate::organize::Layout::default_for(&base);
+        let cat = layout.archive.join("Tools");
+        std::fs::create_dir_all(&cat).unwrap();
+        moddesc_zip(&cat.join("FS25_A.zip"), "Version 1");
+        moddesc_zip(&base.join("FS25_A.zip"), "Version 2");
+        let db_dir = fresh("checked_same_size_db");
+        let conn = crate::db::open(&db_dir.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        crate::db::upsert_organized(
+            &conn,
+            &key,
+            &crate::db::OrganizedRow {
+                tech_name: "FS25_A".into(),
+                file_name: "FS25_A.zip".into(),
+                kind: "zip".into(),
+                category: "Tools".into(),
+                subcategory: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        let scan = || {
+            scan_layouts_with(
+                vec![(base.clone(), vec![layout.archive.clone()])],
+                &[crate::db::load_link_records(&conn, &key)],
+                &HashMap::new(),
+                |_, _| {},
+            )
+        };
+        let title = |out: &ScanOutput| out.result.mods.first().and_then(|m| m.title.clone());
+
+        let before = scan();
+        assert!(before.stand_ins.is_empty(), "trusted until it is checked");
+        assert_eq!(title(&before).as_deref(), Some("Version 1"));
+        let found = crate::organize::detect_foreign_projections(&conn, &layout);
+        assert!(found.len() == 1 && found[0].newly_noted, "{found:?}");
+        let after = scan();
+        assert_eq!(after.stand_ins.len(), 1);
+        assert_eq!(title(&after).as_deref(), Some("Version 2"));
+        // The check after that rescan finds the note already there: no further rescan.
+        let again = crate::organize::detect_foreign_projections(&conn, &layout);
+        assert!(again.len() == 1 && !again[0].newly_noted);
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&db_dir);
     }
 
     /// The other kind of an archived mod's techName (an unpacked folder beside an archived zip)

@@ -47,10 +47,26 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
         });
     }
     if row.active {
-        make_link(&archive, &flat, &row.kind, &mut LinkPolicy::new(layout))
-            .map_err(|e| format!("re-project: {e}"))?;
+        if let Err(e) = make_link(&archive, &flat, &row.kind, &mut LinkPolicy::new(layout)) {
+            // The entry the records were about is in the archive now and the name is empty.
+            db::forget_projection(conn, &key, file_name);
+            return Err(format!("re-project: {e}"));
+        }
     }
+    note_resolved(conn, &key, &row, &flat, &archive);
     Ok(())
+}
+
+/// After adopt or restore put Silo's copy at the mod's name (or left the name empty, for a
+/// parked mod): record it now, with the library copy's stamp, so the rescan right after shows it
+/// as Silo's without waiting for the next foreign-file check; or drop the records for an empty
+/// name.
+fn note_resolved(conn: &Connection, key: &str, row: &OrganizedRow, flat: &Path, archive: &Path) {
+    if row.active && row.kind == "zip" {
+        note_zip_projection(conn, key, &row.file_name, flat, archive);
+    } else {
+        db::forget_projection(conn, key, &row.file_name);
+    }
 }
 
 /// Restore Silo's managed copy over a file the user swapped in: back up their file, then
@@ -104,6 +120,7 @@ pub(super) fn restore_projection_with(
             });
         }
     }
+    note_resolved(conn, &key, &row, &flat, &archive);
     Ok(())
 }
 

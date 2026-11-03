@@ -225,7 +225,14 @@ pub fn set_active_touched(
                     // identified structurally (junction / marker), cheaply.
                     if row.kind == "zip" {
                         if let Some((size, mtime)) = file_stats(&link) {
-                            db::record_projection(conn, &key, &row.file_name, size, mtime);
+                            db::record_projection(
+                                conn,
+                                &key,
+                                &row.file_name,
+                                size,
+                                mtime,
+                                file_stats(&src),
+                            );
                         }
                     }
                     if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, true) {
@@ -289,7 +296,7 @@ pub fn set_active_touched(
                 match projection_verdict(&link, &src, &row.kind) {
                     Ok(true) => {
                         if row.kind == "zip" {
-                            note_zip_projection(conn, &key, &row.file_name, &link);
+                            note_zip_projection(conn, &key, &row.file_name, &link, &src);
                         }
                         mark_active(conn, &key, &row, &mut rep);
                     }
@@ -318,10 +325,11 @@ pub fn set_active_touched(
             }
         } else {
             // Nothing at the name and not wanted: a crash between linking or unlinking and
-            // recording can leave `active = true`, or a gone projection's record, behind. The
-            // record must never vouch for a file put at that name later. (Read first: most parked
-            // mods have none, and a delete per mod would be a write per mod on every call.)
-            if db::projection_stats(conn, &key, &row.file_name).is_some() {
+            // recording can leave `active = true`, or a gone projection's record (or note),
+            // behind. The record must never vouch for a file put at that name later. (Read first:
+            // most parked mods have none, and a delete per mod would be a write per mod on every
+            // call.)
+            if db::has_link_record(conn, &key, &row.file_name) {
                 db::forget_projection(conn, &key, &row.file_name);
             }
             if row.active {

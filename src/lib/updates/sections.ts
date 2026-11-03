@@ -191,6 +191,8 @@ export function droppedBuildFor(row: UpdateRow, foreign: ForeignFile[]): Foreign
   return (
     foreign.find(
       (f) =>
+        // The library copy changing (#431) leaves the older one in the mods folder: no drop.
+        !f.archiveChanged &&
         f.techName === row.techName &&
         !!f.flatVersion &&
         ((!!row.latest && normVersion(f.flatVersion) === normVersion(row.latest)) ||

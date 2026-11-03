@@ -105,7 +105,7 @@ pub const AUTO_SNAPSHOTS_KEPT: i64 = 5;
 ///
 /// Keep migrations additive where possible so an older Silo can still read the file; when one
 /// can't be, the version gate in `open` is what protects the user.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 fn newer_schema(found: i64) -> String {
     format!(
@@ -166,6 +166,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             2 => migrate_2_to_3(&tx)?,
             3 => migrate_3_to_4(&tx)?,
             4 => migrate_4_to_5(&tx)?,
+            5 => migrate_5_to_6(&tx)?,
             other => return Err(format!("no migration from database version {other}")),
         }
         tx.pragma_update(None, "user_version", v + 1)
@@ -312,6 +313,30 @@ fn migrate_4_to_5(tx: &Connection) -> Result<(), String> {
              unnamed_ms   INTEGER,
              decided      INTEGER NOT NULL DEFAULT 0,
              attempted_ms INTEGER NOT NULL
+         );",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Version 6 (#431, #436): a projection record also keeps the archived copy's `(size, mtime_ms)`
+/// when Silo linked it (`src_size`, `src_mtime_ms`; empty for records made before), so a library
+/// copy changed since is noticed without hashing; and `foreign_mark` notes an entry at a mod's name
+/// that a hash showed isn't Silo's copy, with the entry's `(size, mtime_ms)` then, so the scan
+/// shows that file (until it changes). Additive.
+fn migrate_5_to_6(tx: &Connection) -> Result<(), String> {
+    for col in ["src_size", "src_mtime_ms"] {
+        if !has_column(tx, "projection", col) {
+            tx.execute_batch(&format!("ALTER TABLE projection ADD COLUMN {col} INTEGER;"))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS foreign_mark (
+             root      TEXT NOT NULL,
+             file_name TEXT NOT NULL,
+             size      INTEGER NOT NULL,
+             mtime_ms  INTEGER NOT NULL,
+             PRIMARY KEY (root, file_name)
          );",
     )
     .map_err(|e| e.to_string())
@@ -1531,22 +1556,132 @@ pub fn drop_library_row(
         rusqlite::params![root, tech_name],
     )
     .map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
-        rusqlite::params![root, file_name],
-    )
-    .map_err(|e| e.to_string())?;
+    for table in ["projection", "foreign_mark"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE root = ?1 AND file_name = ?2"),
+            rusqlite::params![root, file_name],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 
 /// Record a projected file's identity (size + mtime) so a later remove can confirm it's Silo's
 /// own untouched copy without hashing it.
-pub fn record_projection(conn: &Connection, root: &str, file_name: &str, size: u64, mtime_ms: i64) {
+pub fn record_projection(
+    conn: &Connection,
+    root: &str,
+    file_name: &str,
+    size: u64,
+    mtime_ms: i64,
+    src: Option<(u64, i64)>,
+) {
     let _ = conn.execute(
-        "INSERT INTO projection(root, file_name, size, mtime_ms) VALUES(?1, ?2, ?3, ?4)
-         ON CONFLICT(root, file_name) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms",
-        rusqlite::params![root, file_name, size as i64, mtime_ms],
+        "INSERT INTO projection(root, file_name, size, mtime_ms, src_size, src_mtime_ms)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(root, file_name) DO UPDATE SET size = excluded.size,
+             mtime_ms = excluded.mtime_ms, src_size = excluded.src_size,
+             src_mtime_ms = excluded.src_mtime_ms",
+        rusqlite::params![
+            root,
+            file_name,
+            size as i64,
+            mtime_ms,
+            src.map(|s| s.0 as i64),
+            src.map(|s| s.1)
+        ],
     );
+    // Silo's own now: any note that it wasn't goes.
+    clear_foreign_mark(conn, root, file_name);
+}
+
+/// The archived copy's `(size, mtime_ms)` recorded with a projection when Silo linked it, if any
+/// (none for a record made before version 6).
+pub fn projection_src_stats(conn: &Connection, root: &str, file_name: &str) -> Option<(u64, i64)> {
+    conn.query_row(
+        "SELECT src_size, src_mtime_ms FROM projection WHERE root = ?1 AND file_name = ?2",
+        rusqlite::params![root, file_name],
+        |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+    )
+    .ok()
+    .and_then(|(s, m)| Some((s? as u64, m?)))
+}
+
+/// Note that the entry at `file_name`, with `(size, mtime_ms)`, isn't Silo's copy (a hash said
+/// so), so the scan shows it as the file it is. True when the note is new or changed (written
+/// now); false when it was already there as it is, or couldn't be written.
+pub fn mark_foreign(
+    conn: &Connection,
+    root: &str,
+    file_name: &str,
+    size: u64,
+    mtime_ms: i64,
+) -> bool {
+    conn.execute(
+        "INSERT INTO foreign_mark(root, file_name, size, mtime_ms) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(root, file_name) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms
+         WHERE size != excluded.size OR mtime_ms != excluded.mtime_ms",
+        rusqlite::params![root, file_name, size as i64, mtime_ms],
+    )
+    .is_ok_and(|n| n > 0)
+}
+
+/// Whether Silo keeps a projection record or a foreign-file note for `file_name`.
+pub fn has_link_record(conn: &Connection, root: &str, file_name: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection WHERE root = ?1 AND file_name = ?2)
+             OR EXISTS(SELECT 1 FROM foreign_mark WHERE root = ?1 AND file_name = ?2)",
+        rusqlite::params![root, file_name],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+/// Drop the note that the entry at `file_name` isn't Silo's.
+pub fn clear_foreign_mark(conn: &Connection, root: &str, file_name: &str) {
+    let _ = conn.execute(
+        "DELETE FROM foreign_mark WHERE root = ?1 AND file_name = ?2",
+        rusqlite::params![root, file_name],
+    );
+}
+
+/// What the scan knows about one mods-folder entry Silo has records for (`load_link_records`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LinkRecord {
+    /// The entry's `(size, mtime_ms)` when Silo projected or last confirmed it.
+    pub stamp: Option<(u64, i64)>,
+    /// The entry's `(size, mtime_ms)` when a hash showed it isn't Silo's copy.
+    pub foreign: Option<(u64, i64)>,
+}
+
+/// Every projection record and foreign-file note in this folder, by file name.
+pub fn load_link_records(conn: &Connection, root: &str) -> HashMap<String, LinkRecord> {
+    let mut out: HashMap<String, LinkRecord> = load_projections(conn, root)
+        .into_iter()
+        .map(|(name, stamp)| {
+            (
+                name,
+                LinkRecord {
+                    stamp: Some(stamp),
+                    foreign: None,
+                },
+            )
+        })
+        .collect();
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT file_name, size, mtime_ms FROM foreign_mark WHERE root = ?1")
+    {
+        let rows = stmt.query_map([root], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?),
+            ))
+        });
+        for (name, stamp) in rows.into_iter().flatten().flatten() {
+            out.entry(name).or_default().foreign = Some(stamp);
+        }
+    }
+    out
 }
 
 /// The recorded (size, mtime_ms) for a projected file in this folder, if any.
@@ -1582,6 +1717,7 @@ pub fn forget_projection(conn: &Connection, root: &str, file_name: &str) {
         "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
         rusqlite::params![root, file_name],
     );
+    clear_foreign_mark(conn, root, file_name);
 }
 
 /// Make one folder's `organized` manifest match what's physically in its `archive/`. Upserts a
@@ -1601,12 +1737,14 @@ pub fn reconcile_organized(
         if !keep.contains(existing.tech_name.as_str()) {
             delete_organized(&tx, root, &existing.tech_name)?;
             // Its projection record goes too: left behind, it could vouch for whatever is put
-            // at that name later (#429).
-            tx.execute(
-                "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
-                rusqlite::params![root, existing.file_name],
-            )
-            .map_err(|e| e.to_string())?;
+            // at that name later (#429). So does any foreign-file note.
+            for table in ["projection", "foreign_mark"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE root = ?1 AND file_name = ?2"),
+                    rusqlite::params![root, existing.file_name],
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
     }
     for row in desired {
@@ -2205,7 +2343,7 @@ mod tests {
                 .unwrap();
         }
         let conn = open(&path).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 5);
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(load_sources(&conn).len(), 1, "the library is kept");
         assert_eq!(
             catalog_aliases(&conn, "FS25_FieldToDoList").unwrap().len(),
@@ -2213,6 +2351,57 @@ mod tests {
             "the links are kept"
         );
         assert_eq!(alias_check(&conn, "m/FS25_X.zip").unwrap(), None);
+    }
+
+    #[test]
+    fn migrating_to_v6_adds_link_checks_and_keeps_the_library() {
+        let path = temp_db("v5_to_v6");
+        {
+            let conn = open(&path).unwrap();
+            set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
+            record_projection(&conn, "m", "FS25_A.zip", 10, 1000, None);
+            // Wind it back to a v5 file, as Silo with #388 and #422 left it.
+            conn.execute_batch(
+                "DROP TABLE foreign_mark;
+                 ALTER TABLE projection DROP COLUMN src_size;
+                 ALTER TABLE projection DROP COLUMN src_mtime_ms;
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(load_sources(&conn).len(), 1, "the library is kept");
+        assert_eq!(projection_stats(&conn, "m", "FS25_A.zip"), Some((10, 1000)));
+        assert_eq!(
+            projection_src_stats(&conn, "m", "FS25_A.zip"),
+            None,
+            "an old record has no library-copy stamp"
+        );
+        record_projection(&conn, "m", "FS25_A.zip", 10, 1000, Some((20, 2000)));
+        assert_eq!(
+            projection_src_stats(&conn, "m", "FS25_A.zip"),
+            Some((20, 2000))
+        );
+        mark_foreign(&conn, "m", "FS25_B.zip", 5, 500);
+        assert_eq!(
+            load_link_records(&conn, "m")["FS25_B.zip"].foreign,
+            Some((5, 500))
+        );
+        // Recording Silo's copy at a name, or forgetting it, drops the note.
+        record_projection(&conn, "m", "FS25_B.zip", 6, 600, None);
+        assert_eq!(load_link_records(&conn, "m")["FS25_B.zip"].foreign, None);
+        mark_foreign(&conn, "m", "FS25_B.zip", 5, 500);
+        forget_projection(&conn, "m", "FS25_B.zip");
+        assert!(!load_link_records(&conn, "m").contains_key("FS25_B.zip"));
+        // A note is written once: the same note again changes nothing; a changed one is written.
+        assert!(mark_foreign(&conn, "m", "FS25_B.zip", 5, 500));
+        assert!(!mark_foreign(&conn, "m", "FS25_B.zip", 5, 500));
+        assert!(mark_foreign(&conn, "m", "FS25_B.zip", 5, 501));
+        assert!(has_link_record(&conn, "m", "FS25_B.zip"));
+        // Dropping the mod's row drops its note too.
+        drop_library_row(&conn, "m", "FS25_B", "FS25_B.zip").unwrap();
+        assert!(!has_link_record(&conn, "m", "FS25_B.zip"));
     }
 
     #[test]

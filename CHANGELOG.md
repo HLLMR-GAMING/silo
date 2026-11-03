@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The library database upgrades to version 6. Before upgrading, Silo tries to save a copy of the
+old database in `db-snapshots` (`silo-before-v5.db` when you update from 1.0.4). If a copy by
+that name is already there, Silo keeps it as it is; if the copy can't be made (a full disk, say),
+the upgrade still goes ahead. Silo 1.0.4 can't open the upgraded database, so going back to 1.0.4
+after updating isn't supported.
+
 ### Added
 
 - **Remove from library.** A mod's drawer menu now has **Remove from library…**, and the
@@ -44,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every scan, and again only if it changes or comes back. (#428)
 - When Browse can't load a mod's picture (the image host is down, say), the card shows its letter
   placeholder and the details drop the picture, instead of a broken-image icon. (#428)
+- When the copy of a mod in your library changes after Silo put it in your mods folder (a newer
+  build saved straight into the library, or a cloud sync replacing it), the mod's details and
+  Diagnose → Problems now say so, with **Use the library's copy** and **Keep the mods-folder
+  copy**. Before, Silo kept treating the older mods-folder copy as its own. Whichever you don't
+  pick goes to the backup folder. (#431)
+- A file at a library mod's name that isn't Silo's copy, but is the same size, now shows in the
+  Library as the build it is (its own version and details) once Silo has checked it, instead of as
+  the library's copy. (#436)
 
 ## [1.0.4] - 2026-11-02
 

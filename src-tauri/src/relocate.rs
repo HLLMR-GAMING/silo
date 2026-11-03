@@ -999,7 +999,7 @@ fn repoint(
         // A link that reaches nothing is left as it is (removing it could race whatever
         // replaces it); the retry checks it again before the old copy may go.
         reaches_the_copy(&link, &row.kind).map_err(StepErr::Failed)?;
-        env.note_projection(row, &link);
+        env.note_projection(row, &link, dst);
         return Ok(());
     };
     if !meta.file_type().is_symlink() {
@@ -1014,7 +1014,7 @@ fn repoint(
             let linked =
                 organize::replace_zip_link_if_linkable(&link, dst, policy).map_err(relink_err)?;
             if linked {
-                env.note_projection(row, &link);
+                env.note_projection(row, &link, dst);
             }
         }
         return Ok(());
@@ -1183,7 +1183,7 @@ fn replace_zip_link(
 ) -> Result<(), StepErr> {
     organize::replace_zip_link(link, dst, policy).map_err(relink_err)?;
     reaches_the_copy(link, &row.kind).map_err(StepErr::Failed)?;
-    env.note_projection(row, link);
+    env.note_projection(row, link, dst);
     Ok(())
 }
 
@@ -1365,11 +1365,11 @@ impl Env<'_> {
     /// A zip's mods-folder entry was just (re)made by Silo: refresh its projection record so
     /// later deactivates prove it's Silo's without hashing. A symlink is identified
     /// structurally and keeps none.
-    fn note_projection(&self, row: &OrganizedRow, link: &Path) {
+    fn note_projection(&self, row: &OrganizedRow, link: &Path, src: &Path) {
         if row.kind == "dir" {
             return;
         }
-        organize::note_zip_projection(self.conn, self.mods_key, &row.file_name, link);
+        organize::note_zip_projection(self.conn, self.mods_key, &row.file_name, link, src);
     }
 }
 
