@@ -33,6 +33,7 @@ pub mod paths;
 mod picked;
 pub mod profile;
 pub mod provenance;
+mod recycle;
 pub mod relocate;
 pub mod savegame;
 pub mod scan;
@@ -3314,113 +3315,44 @@ async fn adopt_foreign_file(
     .map_err(error::AppError::from)
 }
 
-/// Move `p` to the Recycle Bin / Trash (#429), and only there.
-/// - Windows: only on a fixed drive (removable, network and optical drives have no Recycle Bin,
-///   and Windows would delete outright), and the Recycle Bin of that drive must hold one more item
-///   afterwards. Where a fixed drive still can't recycle (the bin turned off or too small), Windows
-///   asks before deleting permanently: "No" keeps the file and fails the move, "Yes" is then
-///   reported as deleted, not as moved to the bin.
-/// - Linux: a folder on another drive than the Trash is refused, since moving it there means
-///   copying and then deleting it, which can stop halfway.
-/// - macOS: the system moves it to the Trash of its volume.
-#[cfg(windows)]
-fn move_to_bin(p: &std::path::Path) -> Result<(), String> {
-    if !bin::on_fixed_drive(p) {
-        return Err("this drive has no Recycle Bin, so Silo won't remove it. Delete it yourself if you want it gone".into());
-    }
-    let before = bin::recycle_bin_items(p)
-        .ok_or("Silo couldn't check the Recycle Bin, so it didn't remove it")?;
-    trash::delete(p).map_err(|e| e.to_string())?;
-    if bin::recycle_bin_items(p).is_some_and(|after| after > before) {
-        Ok(())
-    } else {
-        Err("Windows deleted it permanently instead of moving it to the Recycle Bin (it asked first). It can't be restored from there".into())
-    }
+/// The removal plan the user is being asked to confirm (#429): its id, the mods folder it was
+/// made for, and each planned mod's evidence. One at a time; a new plan replaces it.
+type PendingRemoval = (u64, String, Vec<(organize::Planned, organize::Evidence)>);
+static PENDING_REMOVAL: std::sync::Mutex<Option<PendingRemoval>> = std::sync::Mutex::new(None);
+
+/// Check the mods the Library asks to remove and record what each one is, for the confirmation
+/// (#429). Nothing changes on disk. `remove_from_library` with the returned id carries it out.
+#[tauri::command]
+async fn plan_removal(
+    app: tauri::AppHandle,
+    items: Vec<organize::RemoveRequest>,
+) -> Result<(u64, organize::RemovalPlan), error::AppError> {
+    ensure_no_move()?;
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<(u64, organize::RemovalPlan), String> {
+        let _write = library_write()?;
+        let (layout, key) = active_layout()?;
+        let conn = db::open(&db)?;
+        let archive_ok = ensure_archive_available().is_ok();
+        let (plan, found) = organize::plan_removal(&conn, &layout, &items, archive_ok);
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *PENDING_REMOVAL.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, key, found));
+        Ok((id, plan))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
-#[cfg(not(windows))]
-fn move_to_bin(p: &std::path::Path) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    if p.is_dir() && !bin::same_drive_as_trash(p) {
-        return Err("this folder is on another drive than your Trash, so Silo won't move it there. Delete it yourself if you want it gone".into());
-    }
-    trash::delete(p).map_err(|e| e.to_string())
-}
-
-/// What `move_to_bin` checks about the platform's bin.
-mod bin {
-    /// Whether `p` is on a fixed drive (one with a Recycle Bin). False when it can't be told.
-    #[cfg(windows)]
-    pub(super) fn on_fixed_drive(p: &std::path::Path) -> bool {
-        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
-        const DRIVE_FIXED: u32 = 3; // windows-sys WindowsProgramming::DRIVE_FIXED
-        let Some(root) = volume_root(p) else {
-            return false;
-        };
-        // SAFETY: `root` is a NUL-terminated volume path.
-        unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
-    }
-
-    /// How many items the Recycle Bin of `p`'s drive holds, or None when it can't be read.
-    #[cfg(windows)]
-    pub(super) fn recycle_bin_items(p: &std::path::Path) -> Option<i64> {
-        use windows_sys::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
-        let root = volume_root(p)?;
-        let mut info = SHQUERYRBINFO {
-            cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
-            i64Size: 0,
-            i64NumItems: 0,
-        };
-        // SAFETY: `root` is NUL-terminated and `info` is a sized struct the call fills.
-        let hr = unsafe { SHQueryRecycleBinW(root.as_ptr(), &mut info) };
-        (hr >= 0).then_some(info.i64NumItems)
-    }
-
-    /// The NUL-terminated root of the volume `p` is on (a drive letter's root, or a mount folder).
-    #[cfg(windows)]
-    fn volume_root(p: &std::path::Path) -> Option<Vec<u16>> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
-        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
-        let mut root = vec![0u16; 1024];
-        // SAFETY: both buffers are valid for the call; `wide` is NUL-terminated and `root` holds
-        // `root.len()` units.
-        let ok = unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) };
-        if ok == 0 {
-            return None;
-        }
-        let end = root.iter().position(|&c| c == 0)?;
-        root.truncate(end + 1);
-        Some(root)
-    }
-
-    /// Whether `p` is on the same drive as the user's Trash (`$XDG_DATA_HOME/Trash`, or the
-    /// nearest folder of it that exists). False when it can't be told.
-    #[cfg(target_os = "linux")]
-    pub(super) fn same_drive_as_trash(p: &std::path::Path) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        let Some(mut trash) = dirs::data_dir().map(|d| d.join("Trash")) else {
-            return false;
-        };
-        let trash_dev = loop {
-            if let Ok(m) = std::fs::metadata(&trash) {
-                break m.dev();
-            }
-            if !trash.pop() {
-                return false;
-            }
-        };
-        std::fs::symlink_metadata(p).is_ok_and(|m| m.dev() == trash_dev)
-    }
-}
-
-/// Remove mods from the library (#429): each one's file or folder goes to the Recycle Bin / Trash,
-/// an active library mod is parked first. Refused while FS25 runs or a move is under way. The
-/// caller rescans afterward.
+/// Carry out the confirmed removal plan `plan_id` (#429): each mod is checked again against what
+/// was confirmed, an active library mod is parked first, and each file or folder goes to the
+/// Recycle Bin / Trash (`recycle::move_to_bin`). Refused while FS25 runs or starts, a move is
+/// under way, or the plan is gone or was made for another mods folder. The caller rescans.
 #[tauri::command]
 async fn remove_from_library(
     app: tauri::AppHandle,
-    items: Vec<organize::RemoveItem>,
+    plan_id: u64,
 ) -> Result<organize::RemoveReport, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
@@ -3429,10 +3361,19 @@ async fn remove_from_library(
         // Admitted once the write is ours (waiting for it can take a while, and the game may
         // have started meanwhile); Play waits until it's done.
         let _admitted = admit_removal()?;
-        let (layout, _) = active_layout()?;
+        let stale = "That removal is out of date. Choose the mods and remove them again.";
+        let (id, key, planned) = PENDING_REMOVAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or(stale)?;
+        let (layout, now) = active_layout()?;
+        if id != plan_id || key != now {
+            return Err(stale.into());
+        }
         let conn = db::open(&db)?;
         let archive_ok = ensure_archive_available().is_ok();
-        let rep = organize::remove_from_library(&conn, &layout, &items, archive_ok, &move_to_bin);
+        let rep = organize::carry_out(&conn, &layout, &planned, archive_ok, &recycle::move_to_bin);
         log::info!(
             "removed {} mod(s) from the library to the Recycle Bin ({} not removed)",
             rep.removed.len(),
@@ -8306,6 +8247,7 @@ pub fn run() {
         detect_foreign_files,
         adopt_foreign_file,
         restore_foreign_file,
+        plan_removal,
         remove_from_library,
         relink_projections,
         hardlink_support,

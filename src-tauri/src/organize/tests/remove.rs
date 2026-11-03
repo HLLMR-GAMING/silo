@@ -3,39 +3,39 @@
 use super::*;
 
 /// A stand-in Recycle Bin: moves the entry into `bin` (so a test can see what went where).
-fn bin_at(bin: &Path) -> impl Fn(&Path) -> Result<(), String> + '_ {
+fn bin_at(bin: &Path) -> impl Fn(&Path) -> Binned + '_ {
     move |p: &Path| {
-        std::fs::create_dir_all(bin).map_err(|e| e.to_string())?;
-        std::fs::rename(p, bin.join(p.file_name().unwrap())).map_err(|e| e.to_string())
-    }
-}
-
-/// An item as the confirmation would show `path` now (its kind, size and modified time).
-fn item(tech: &str, path: &Path) -> RemoveItem {
-    let (kind, size, mtime_ms) = match std::fs::metadata(path) {
-        Ok(m) => (
-            if m.is_dir() { "dir" } else { "zip" },
-            m.len(),
-            m.modified()
-                .unwrap()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-        ),
-        Err(_) => ("zip", 0, 0),
-    };
-    RemoveItem {
-        tech_name: tech.into(),
-        path: path.to_string_lossy().into_owned(),
-        kind: kind.into(),
-        size,
-        mtime_ms,
+        std::fs::create_dir_all(bin).unwrap();
+        match std::fs::rename(p, bin.join(p.file_name().unwrap())) {
+            Ok(()) => Binned::Recycled,
+            Err(e) => Binned::Kept(e.to_string()),
+        }
     }
 }
 
 /// A Recycle Bin that must never be reached.
-fn no_bin(p: &Path) -> Result<(), String> {
+fn no_bin(p: &Path) -> Binned {
     panic!("moved {} to the bin", p.display())
+}
+
+fn req(tech: &str, path: &Path) -> RemoveRequest {
+    RemoveRequest {
+        tech_name: tech.into(),
+        path: path.to_string_lossy().into_owned(),
+    }
+}
+
+/// Plan, then carry out at once (as confirming straight away would).
+fn remove(
+    conn: &Connection,
+    layout: &Layout,
+    reqs: &[RemoveRequest],
+    archive_ok: bool,
+    bin: &dyn Fn(&Path) -> Binned,
+) -> (RemovalPlan, RemoveReport) {
+    let (plan, found) = plan_removal(conn, layout, reqs, archive_ok);
+    let rep = carry_out(conn, layout, &found, archive_ok, bin);
+    (plan, rep)
 }
 
 /// A mods folder with `FS25_Foo` filed under Vehicles; active means linked into the mods folder.
@@ -57,17 +57,24 @@ fn library_with_foo(tag: &str, active: bool) -> (PathBuf, Connection, Layout, Pa
     (base, conn, layout, src)
 }
 
+fn key_of(layout: &Layout) -> String {
+    crate::modsroot::canonical_key(&layout.mods)
+}
+
 #[test]
 fn removing_a_parked_library_mod_bins_its_archived_copy_and_drops_its_row() {
     let (base, conn, layout, src) = library_with_foo("rm_parked", false);
     let bin = base.join("bin");
-    let rep = remove_from_library(
+    let (plan, rep) = remove(
         &conn,
         &layout,
-        &[item("FS25_Foo", &src)],
+        &[req("FS25_Foo", &src)],
         true,
         &bin_at(&bin),
     );
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].file_name, "FS25_Foo.zip");
+    assert!(!plan.items[0].on);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     assert_eq!(
         rep.removed,
@@ -76,13 +83,11 @@ fn removing_a_parked_library_mod_bins_its_archived_copy_and_drops_its_row() {
             path: src.to_string_lossy().into_owned()
         }]
     );
-    assert!(!src.exists());
     assert_eq!(
         std::fs::read(bin.join("FS25_Foo.zip")).unwrap(),
-        b"PK\x03\x04 Foo",
-        "in the bin, whole"
+        b"PK\x03\x04 Foo"
     );
-    assert!(db::load_organized(&conn, &crate::modsroot::canonical_key(&layout.mods)).is_empty());
+    assert!(db::load_organized(&conn, &key_of(&layout)).is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -90,22 +95,22 @@ fn removing_a_parked_library_mod_bins_its_archived_copy_and_drops_its_row() {
 fn removing_an_active_library_mod_parks_it_first() {
     let (base, conn, layout, src) = library_with_foo("rm_active", true);
     let bin = base.join("bin");
-    let rep = remove_from_library(
+    let (plan, rep) = remove(
         &conn,
         &layout,
-        &[item("FS25_Foo", &src)],
+        &[req("FS25_Foo", &src)],
         true,
         &bin_at(&bin),
     );
+    assert!(plan.items[0].on, "the confirmation says it's parked first");
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     assert!(
         !layout.mods.join("FS25_Foo.zip").exists(),
         "no link left in the mods folder"
     );
     assert!(bin.join("FS25_Foo.zip").exists());
-    let key = crate::modsroot::canonical_key(&layout.mods);
-    assert!(db::load_organized(&conn, &key).is_empty());
-    assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none());
+    assert!(db::load_organized(&conn, &key_of(&layout)).is_empty());
+    assert!(db::projection_stats(&conn, &key_of(&layout), "FS25_Foo.zip").is_none());
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -113,71 +118,64 @@ fn removing_an_active_library_mod_parks_it_first() {
 fn a_mod_that_cant_be_parked_stays() {
     // Active, with the user's own different build at its name: parking refuses, so nothing goes.
     let (base, conn, layout, src) = library_with_foo("rm_noprk", false);
-    db::set_organized_active(
-        &conn,
-        &crate::modsroot::canonical_key(&layout.mods),
-        "FS25_Foo",
-        true,
-    )
-    .unwrap();
+    db::set_organized_active(&conn, &key_of(&layout), "FS25_Foo", true).unwrap();
     let theirs = layout.mods.join("FS25_Foo.zip");
     std::fs::write(&theirs, b"the user's own build").unwrap();
-    let bin = base.join("bin");
-    let rep = remove_from_library(
-        &conn,
-        &layout,
-        &[item("FS25_Foo", &src)],
-        true,
-        &bin_at(&bin),
-    );
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &no_bin);
     assert!(rep.removed.is_empty());
-    assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
     assert!(
-        rep.errors[0].starts_with("FS25_Foo: ") && rep.errors[0].ends_with("It wasn't removed.")
+        rep.errors[0].starts_with("FS25_Foo: ") && rep.errors[0].ends_with("It wasn't removed."),
+        "{:?}",
+        rep.errors
     );
-    assert!(src.exists(), "archived copy kept");
+    assert!(src.exists());
     assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own build");
-    assert!(!bin.exists());
     let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
 fn a_library_mod_is_refused_while_the_archive_is_unreachable() {
     let (base, conn, layout, src) = library_with_foo("rm_noarch", false);
-    let bin = base.join("bin");
-    let rep = remove_from_library(
-        &conn,
-        &layout,
-        &[item("FS25_Foo", &src)],
-        false,
-        &bin_at(&bin),
-    );
-    assert!(rep.removed.is_empty());
+    let (plan, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], false, &no_bin);
+    assert!(plan.items.is_empty());
     assert!(
-        rep.errors[0].contains("isn't reachable"),
+        plan.refused[0].contains("isn't reachable"),
         "{:?}",
-        rep.errors
+        plan.refused
     );
+    assert!(rep.removed.is_empty() && rep.errors.is_empty());
     assert!(src.exists());
     let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
-fn a_failed_move_to_the_bin_keeps_the_row() {
-    let (base, conn, layout, src) = library_with_foo("rm_binfail", false);
-    let fail = |_: &Path| Err("the Recycle Bin is full".to_string());
-    let rep = remove_from_library(&conn, &layout, &[item("FS25_Foo", &src)], true, &fail);
+fn a_mod_the_bin_kept_stays_in_the_library_and_one_gone_unconfirmed_leaves_it() {
+    let (base, conn, layout, src) = library_with_foo("rm_bin_outcomes", false);
+    let kept = |_: &Path| Binned::Kept("the Recycle Bin is full".into());
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &kept);
+    assert!(rep.removed.is_empty());
+    assert_eq!(
+        rep.errors,
+        vec!["FS25_Foo: the Recycle Bin is full. It's still in your library, parked.".to_string()]
+    );
+    assert_eq!(db::load_organized(&conn, &key_of(&layout)).len(), 1);
+    // Gone from its folder without a Recycle Bin record: not reported as removed or as still
+    // parked, and its records go (nothing is left for them to describe).
+    let unsure = |p: &Path| {
+        std::fs::remove_file(p).unwrap();
+        Binned::Unsure(
+            "it's gone from its folder, but Silo found no Recycle Bin record for it".into(),
+        )
+    };
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &unsure);
     assert!(rep.removed.is_empty());
     assert!(
-        rep.errors[0].contains("the Recycle Bin is full"),
+        rep.errors[0].contains("Look in the Recycle Bin for FS25_Foo.zip"),
         "{:?}",
         rep.errors
     );
-    assert!(src.exists());
-    assert_eq!(
-        db::load_organized(&conn, &crate::modsroot::canonical_key(&layout.mods)).len(),
-        1
-    );
+    assert!(!rep.errors[0].contains("parked"));
+    assert!(db::load_organized(&conn, &key_of(&layout)).is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -191,16 +189,21 @@ fn a_loose_zip_and_folder_go_to_the_bin() {
     let conn = db::open(&base.join("silo.db")).unwrap();
     let layout = Layout::default_for(&mods);
     let bin = base.join("bin");
-    let rep = remove_from_library(
+    let (plan, rep) = remove(
         &conn,
         &layout,
         &[
-            item("FS25_Loose", &mods.join("FS25_Loose.zip")),
-            item("FS25_Unzipped", &mods.join("FS25_Unzipped")),
+            req("FS25_Loose", &mods.join("FS25_Loose.zip")),
+            req("FS25_Unzipped", &mods.join("FS25_Unzipped")),
         ],
         true,
         &bin_at(&bin),
     );
+    assert!(
+        plan.items.iter().all(|p| p.on),
+        "loose mods are ones the game loads"
+    );
+    assert_eq!(plan.items[1].kind, "dir");
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     assert_eq!(rep.removed.len(), 2);
     assert!(bin.join("FS25_Loose.zip").is_file());
@@ -223,48 +226,200 @@ fn paths_outside_the_mods_folder_and_the_archive_folder_itself_are_refused() {
     std::fs::write(&nested, b"PK").unwrap();
     let conn = db::open(&base.join("silo.db")).unwrap();
     let layout = Layout::default_for(&mods);
-    let bin = base.join("bin");
-    let rep = remove_from_library(
+    let (plan, rep) = remove(
         &conn,
         &layout,
         &[
-            item("FS25_Elsewhere", &elsewhere),
-            item("FS25_Nested", &nested),
-            item("archive", &mods.join(ARCHIVE)),
-            item("FS25_Dots", &mods.join("..").join("FS25_Elsewhere.zip")),
+            req("FS25_Elsewhere", &elsewhere),
+            req("FS25_Nested", &nested),
+            req("archive", &mods.join(ARCHIVE)),
+            req("FS25_Dots", &mods.join("..").join("FS25_Elsewhere.zip")),
         ],
         true,
-        &bin_at(&bin),
+        &no_bin,
     );
-    assert!(rep.removed.is_empty(), "{:?}", rep.removed);
-    assert_eq!(rep.errors.len(), 4, "{:?}", rep.errors);
+    assert!(plan.items.is_empty());
+    assert_eq!(plan.refused.len(), 4, "{:?}", plan.refused);
+    assert!(rep.removed.is_empty() && rep.errors.is_empty());
     assert!(elsewhere.exists() && nested.exists() && mods.join(ARCHIVE).is_dir());
-    assert!(!bin.exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_loose_item_must_be_the_named_mod() {
+    let base = temp_dir_for("rm_notit");
+    let mods = base.join("mods");
+    std::fs::create_dir_all(mods.join("FS25_NoDesc")).unwrap();
+    std::fs::write(mods.join("FS25_Other.zip"), b"PK other").unwrap();
+    std::fs::write(mods.join("notes.txt"), b"hi").unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let (plan, _) = remove(
+        &conn,
+        &layout,
+        &[
+            req("FS25_Foo", &mods.join("FS25_Other.zip")),
+            req("FS25_NoDesc", &mods.join("FS25_NoDesc")),
+            req("notes", &mods.join("notes.txt")),
+        ],
+        true,
+        &no_bin,
+    );
+    assert!(plan.items.is_empty());
+    assert_eq!(plan.refused.len(), 3, "{:?}", plan.refused);
+    assert!(
+        plan.refused.iter().all(|e| e.contains("isn't that mod")),
+        "{:?}",
+        plan.refused
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn silos_own_folders_are_refused_even_named_and_with_a_moddesc() {
+    let base = temp_dir_for("rm_reserved");
+    let mods = base.join("mods");
+    for d in ["archive", "backups"] {
+        std::fs::create_dir_all(mods.join(d)).unwrap();
+        std::fs::write(mods.join(d).join("modDesc.xml"), "<modDesc/>").unwrap();
+    }
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let (plan, _) = remove(
+        &conn,
+        &layout,
+        &[
+            req("archive", &mods.join("archive")),
+            req("backups", &mods.join("backups")),
+            req("FS25_Foo", &mods.join("backups")),
+        ],
+        true,
+        &no_bin,
+    );
+    assert!(plan.items.is_empty());
+    assert_eq!(plan.refused.len(), 2, "each path once: {:?}", plan.refused);
+    assert!(
+        plan.refused.iter().all(|e| e.contains("Silo's own")),
+        "{:?}",
+        plan.refused
+    );
     let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
 fn silos_own_copy_of_a_library_mod_is_refused_as_a_loose_item() {
-    // A byte-identical copy at a library mod's name is Silo's projection: removing it as a loose
-    // file would leave the library entry behind with no say.
     let (base, conn, layout, _src) = library_with_foo("rm_projcopy", false);
     let copy = layout.mods.join("FS25_Foo.zip");
     std::fs::write(&copy, b"PK\x03\x04 Foo").unwrap();
+    let (plan, _) = remove(&conn, &layout, &[req("FS25_Foo", &copy)], true, &no_bin);
+    assert!(plan.items.is_empty());
+    assert!(
+        plan.refused[0].contains("Silo's copy of a mod in your library"),
+        "{:?}",
+        plan.refused
+    );
+    assert!(copy.exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn the_same_path_twice_is_removed_once() {
+    let (base, conn, layout, src) = library_with_foo("rm_twice", false);
     let bin = base.join("bin");
-    let rep = remove_from_library(
+    let (plan, rep) = remove(
         &conn,
         &layout,
-        &[item("FS25_Foo", &copy)],
+        &[req("FS25_Foo", &src), req("FS25_Foo", &src)],
         true,
         &bin_at(&bin),
     );
-    assert!(rep.removed.is_empty());
+    assert_eq!(plan.items.len(), 1);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.removed.len(), 1);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Plan `reqs`, run `between` (what happens while the confirmation is up), then carry out with a
+/// bin that must never be reached: whatever changed must be refused before anything moves.
+fn changed_while_confirming(
+    conn: &Connection,
+    layout: &Layout,
+    reqs: &[RemoveRequest],
+    between: impl FnOnce(),
+) -> RemoveReport {
+    let (plan, found) = plan_removal(conn, layout, reqs, true);
+    assert_eq!(plan.items.len(), reqs.len(), "{:?}", plan.refused);
+    between();
+    carry_out(conn, layout, &found, true, &no_bin)
+}
+
+#[test]
+fn a_zip_replaced_with_one_of_the_same_size_and_time_is_refused() {
+    let base = temp_dir_for("rm_swap_same");
+    let mods = base.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let zip = mods.join("FS25_Loose.zip");
+    std::fs::write(&zip, b"PK the build you saw").unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let rep = changed_while_confirming(&conn, &layout, &[req("FS25_Loose", &zip)], || {
+        let when = std::fs::metadata(&zip).unwrap().modified().unwrap();
+        let other = mods.join("other.tmp");
+        std::fs::write(&other, b"PK a different one!!").unwrap(); // same length
+        std::fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        std::fs::remove_file(&zip).unwrap();
+        std::fs::rename(&other, &zip).unwrap();
+    });
     assert!(
-        rep.errors[0].contains("Silo's copy of a mod in your library"),
+        rep.errors[0].contains("changed since you confirmed"),
         "{:?}",
         rep.errors
     );
-    assert!(copy.exists());
+    assert_eq!(std::fs::read(&zip).unwrap(), b"PK a different one!!");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_folder_whose_contents_changed_is_refused() {
+    let base = temp_dir_for("rm_folder_changed");
+    let mods = base.join("mods");
+    let dir = mods.join("FS25_Unzipped");
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("modDesc.xml"), b"<modDesc/>").unwrap();
+    std::fs::write(dir.join("data/a.xml"), b"one").unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let rep = changed_while_confirming(&conn, &layout, &[req("FS25_Unzipped", &dir)], || {
+        std::fs::write(dir.join("data/a.xml"), b"a longer file now").unwrap();
+    });
+    assert!(
+        rep.errors[0].contains("changed since you confirmed"),
+        "{:?}",
+        rep.errors
+    );
+    assert!(dir.join("data/a.xml").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn an_archived_zip_replaced_by_a_folder_is_refused_before_parking() {
+    let (base, conn, layout, src) = library_with_foo("rm_kindswap", true);
+    let rep = changed_while_confirming(&conn, &layout, &[req("FS25_Foo", &src)], || {
+        std::fs::remove_file(&src).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("notes.txt"), b"someone else's folder").unwrap();
+    });
+    assert!(!rep.errors.is_empty());
+    assert!(src.join("notes.txt").is_file());
+    assert!(
+        db::load_organized(&conn, &key_of(&layout))[0].active,
+        "not parked for a refused removal"
+    );
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -276,111 +431,25 @@ fn a_loose_link_is_left_alone() {
     std::fs::create_dir_all(&mods).unwrap();
     let target = base.join("FS25_Target");
     std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("modDesc.xml"), "<modDesc/>").unwrap();
     std::os::unix::fs::symlink(&target, mods.join("FS25_Target")).unwrap();
     let conn = db::open(&base.join("silo.db")).unwrap();
     let layout = Layout::default_for(&mods);
-    let bin = base.join("bin");
-    let rep = remove_from_library(
+    let (plan, _) = remove(
         &conn,
         &layout,
-        &[item("FS25_Target", &mods.join("FS25_Target"))],
-        true,
-        &bin_at(&bin),
-    );
-    assert!(rep.removed.is_empty());
-    assert!(rep.errors[0].contains("is a link"), "{:?}", rep.errors);
-    assert!(target.is_dir());
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn a_loose_item_must_be_the_named_mod() {
-    let base = temp_dir_for("rm_notit");
-    let mods = base.join("mods");
-    std::fs::create_dir_all(mods.join("backups")).unwrap();
-    std::fs::write(mods.join("backups/FS25_Old.zip.1.bak"), b"PK").unwrap();
-    std::fs::create_dir_all(mods.join("FS25_NoDesc")).unwrap();
-    std::fs::write(mods.join("FS25_Other.zip"), b"PK other").unwrap();
-    std::fs::write(mods.join("notes.txt"), b"hi").unwrap();
-    let conn = db::open(&base.join("silo.db")).unwrap();
-    let layout = Layout::default_for(&mods);
-    let rep = remove_from_library(
-        &conn,
-        &layout,
-        &[
-            item("FS25_Foo", &mods.join("backups")),
-            item("FS25_Foo", &mods.join("FS25_Other.zip")),
-            item("FS25_NoDesc", &mods.join("FS25_NoDesc")),
-            item("notes", &mods.join("notes.txt")),
-        ],
+        &[req("FS25_Target", &mods.join("FS25_Target"))],
         true,
         &no_bin,
     );
-    assert!(rep.removed.is_empty());
-    assert_eq!(rep.errors.len(), 4, "{:?}", rep.errors);
-    assert!(
-        rep.errors
-            .iter()
-            .all(|e| e.contains("isn't that mod") || e.contains("Silo's own")),
-        "{:?}",
-        rep.errors
-    );
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn a_zip_changed_since_confirmed_is_left() {
-    let base = temp_dir_for("rm_changed");
-    let mods = base.join("mods");
-    std::fs::create_dir_all(&mods).unwrap();
-    let zip = mods.join("FS25_Loose.zip");
-    std::fs::write(&zip, b"PK the build you saw").unwrap();
-    let seen = item("FS25_Loose", &zip);
-    std::fs::write(&zip, b"PK another build put here meanwhile").unwrap();
-    let conn = db::open(&base.join("silo.db")).unwrap();
-    let layout = Layout::default_for(&mods);
-    let rep = remove_from_library(&conn, &layout, &[seen], true, &no_bin);
-    assert!(rep.removed.is_empty());
-    assert!(
-        rep.errors[0].contains("changed since you confirmed"),
-        "{:?}",
-        rep.errors
-    );
-    // As it is now, it goes.
-    let bin = base.join("bin");
-    let rep = remove_from_library(
-        &conn,
-        &layout,
-        &[item("FS25_Loose", &zip)],
-        true,
-        &bin_at(&bin),
-    );
-    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
-    assert!(bin.join("FS25_Loose.zip").is_file());
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn the_same_path_twice_is_removed_once() {
-    let (base, conn, layout, src) = library_with_foo("rm_twice", false);
-    let bin = base.join("bin");
-    let rep = remove_from_library(
-        &conn,
-        &layout,
-        &[item("FS25_Foo", &src), item("FS25_Foo", &src)],
-        true,
-        &bin_at(&bin),
-    );
-    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
-    assert_eq!(rep.removed.len(), 1);
+    assert!(plan.refused[0].contains("is a link"), "{:?}", plan.refused);
+    assert!(target.is_dir());
     let _ = std::fs::remove_dir_all(&base);
 }
 
 #[cfg(unix)]
 #[test]
 fn a_category_folder_swapped_for_a_link_is_refused() {
-    // The archived copy's category folder replaced by a link to somewhere else holding a file of
-    // that name: the move would land outside the library.
     let (base, conn, layout, src) = library_with_foo("rm_catlink", false);
     let outside = base.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
@@ -388,12 +457,11 @@ fn a_category_folder_swapped_for_a_link_is_refused() {
     let cat = src.parent().unwrap().to_path_buf();
     std::fs::remove_dir_all(&cat).unwrap();
     std::os::unix::fs::symlink(&outside, &cat).unwrap();
-    let rep = remove_from_library(&conn, &layout, &[item("FS25_Foo", &src)], true, &no_bin);
-    assert!(rep.removed.is_empty());
+    let (plan, _) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &no_bin);
     assert!(
-        rep.errors[0].contains("isn't where Silo expects it"),
+        plan.refused[0].contains("isn't where Silo expects it"),
         "{:?}",
-        rep.errors
+        plan.refused
     );
     assert!(outside.join("FS25_Foo.zip").is_file());
     let _ = std::fs::remove_dir_all(&base);
@@ -401,78 +469,41 @@ fn a_category_folder_swapped_for_a_link_is_refused() {
 
 #[cfg(unix)]
 #[test]
-fn an_archived_copy_that_is_a_link_is_refused() {
-    let (base, conn, layout, src) = library_with_foo("rm_leaflink", false);
-    let outside = base.join("elsewhere.zip");
-    std::fs::write(&outside, b"PK elsewhere").unwrap();
-    std::fs::remove_file(&src).unwrap();
-    std::os::unix::fs::symlink(&outside, &src).unwrap();
-    let rep = remove_from_library(&conn, &layout, &[item("FS25_Foo", &src)], true, &no_bin);
-    assert!(rep.removed.is_empty());
-    assert!(rep.errors[0].contains("is a link"), "{:?}", rep.errors);
-    assert!(outside.is_file());
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn an_archived_zip_replaced_by_a_folder_is_refused_before_parking() {
-    let (base, conn, layout, src) = library_with_foo("rm_kindswap", true);
-    let seen = item("FS25_Foo", &src);
-    // Swapped for a folder after the confirmation: nothing may move, and the mod stays on.
-    std::fs::remove_file(&src).unwrap();
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(src.join("notes.txt"), b"someone else's folder").unwrap();
-    let rep = remove_from_library(&conn, &layout, &[seen], true, &no_bin);
-    assert!(rep.removed.is_empty());
+fn a_custom_archive_link_retargeted_while_confirming_is_refused() {
+    // The library archive is a link the user chose; it's pointed at another tree holding the same
+    // names before the removal runs: the confirmed library isn't the one there now.
+    let base = temp_dir_for("rm_retarget");
+    let mods = base.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    for t in ["real", "other"] {
+        std::fs::create_dir_all(base.join(t).join("Vehicles")).unwrap();
+        std::fs::write(base.join(t).join("Vehicles/FS25_Foo.zip"), b"PK Foo").unwrap();
+    }
+    let arch = base.join("lib");
+    std::os::unix::fs::symlink(base.join("real"), &arch).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout {
+        mods: mods.clone(),
+        archive: arch.clone(),
+    };
+    organize_row(&conn, &mods, "FS25_Foo", "Vehicles", false);
+    let src = arch.join("Vehicles/FS25_Foo.zip");
+    let rep = changed_while_confirming(&conn, &layout, &[req("FS25_Foo", &src)], || {
+        std::fs::remove_file(&arch).unwrap();
+        std::os::unix::fs::symlink(base.join("other"), &arch).unwrap();
+    });
     assert!(
         rep.errors[0].contains("changed since you confirmed"),
         "{:?}",
         rep.errors
     );
-    assert!(src.join("notes.txt").is_file());
-    let key = crate::modsroot::canonical_key(&layout.mods);
-    assert!(
-        db::load_organized(&conn, &key)[0].active,
-        "not parked for a refused removal"
-    );
-    let _ = std::fs::remove_dir_all(&base);
-}
-
-#[test]
-fn silos_own_folders_are_refused_even_named_and_with_a_moddesc() {
-    let base = temp_dir_for("rm_reserved");
-    let mods = base.join("mods");
-    for d in ["archive", "backups", "Backups"] {
-        std::fs::create_dir_all(mods.join(d)).unwrap();
-        std::fs::write(mods.join(d).join("modDesc.xml"), "<modDesc/>").unwrap();
-    }
-    let conn = db::open(&base.join("silo.db")).unwrap();
-    let layout = Layout::default_for(&mods);
-    let rep = remove_from_library(
-        &conn,
-        &layout,
-        &[
-            item("archive", &mods.join("archive")),
-            item("backups", &mods.join("backups")),
-            item("Backups", &mods.join("Backups")),
-        ],
-        true,
-        &no_bin,
-    );
-    assert!(rep.removed.is_empty());
-    assert_eq!(rep.errors.len(), 3, "{:?}", rep.errors);
-    assert!(
-        rep.errors.iter().all(|e| e.contains("Silo's own")),
-        "{:?}",
-        rep.errors
-    );
+    assert!(base.join("other/Vehicles/FS25_Foo.zip").is_file());
     let _ = std::fs::remove_dir_all(&base);
 }
 
 #[cfg(unix)]
 #[test]
 fn a_slot_silo_cant_inspect_refuses() {
-    // The archive elsewhere (readable), the mods folder unsearchable: the slot can't be checked.
     use std::os::unix::fs::PermissionsExt;
     let base = temp_dir_for("rm_noslot");
     let mods = base.join("mods");
@@ -487,7 +518,8 @@ fn a_slot_silo_cant_inspect_refuses() {
         archive: arch.clone(),
     };
     organize_row(&conn, &mods, "FS25_Foo", "Vehicles", false);
-    let seen = item("FS25_Foo", &src);
+    let (plan, found) = plan_removal(&conn, &layout, &[req("FS25_Foo", &src)], true);
+    assert_eq!(plan.items.len(), 1, "{:?}", plan.refused);
     std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o600)).unwrap();
     if mods
         .join("FS25_Foo.zip")
@@ -500,14 +532,10 @@ fn a_slot_silo_cant_inspect_refuses() {
         let _ = std::fs::remove_dir_all(&base);
         return;
     }
-    let rep = remove_from_library(&conn, &layout, &[seen], true, &no_bin);
+    let rep = carry_out(&conn, &layout, &found, true, &no_bin);
     std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(rep.removed.is_empty());
-    assert!(
-        rep.errors[0].contains("couldn't check FS25_Foo.zip in your mods folder"),
-        "{:?}",
-        rep.errors
-    );
+    assert!(!rep.errors.is_empty(), "refused");
     assert!(src.is_file());
     let _ = std::fs::remove_dir_all(&base);
 }

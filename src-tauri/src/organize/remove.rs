@@ -1,25 +1,71 @@
 //! Remove a mod from the library (#429): its file or folder goes to the Recycle Bin / Trash, an
-//! active library mod is parked first, and its library row goes. Nothing is ever deleted outright,
-//! and anything Silo can't prove is the mod the user confirmed is left where it is.
+//! active library mod is parked first, and its library row goes. Nothing is deleted outright, and
+//! nothing Silo can't prove is what the user confirmed is touched.
+//!
+//! Two steps. [`plan_removal`] checks each asked-for mod and records what it is ([`Evidence`]: the
+//! entry's file number, kind, size and time, a folder's whole listing, and where the mods folder
+//! and library really are); the confirmation names what the plan holds. [`carry_out`] checks it
+//! all again and refuses anything that changed since, before parking or moving anything.
 
 use super::*;
 
-/// One mod to remove, as the confirmation showed it: its tech name, the path the Library shows
-/// (the archived copy for a library mod, the file or folder in the mods folder for one that isn't
-/// filed), whether it's a zip or a folder, and the size and modified time the scan read for it.
-/// An entry that changed since (another kind, another size or time) is refused, not removed unseen.
+/// One mod the Library asks to remove: its tech name and the path it shows for it (the archived
+/// copy for a library mod, the file or folder in the mods folder for one that isn't filed).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RemoveItem {
+pub struct RemoveRequest {
     pub tech_name: String,
     pub path: String,
-    /// "zip" | "dir"
-    pub kind: String,
-    pub size: u64,
-    pub mtime_ms: u64,
 }
 
-/// One mod that went to the Recycle Bin, as it was asked for.
+/// A mod a plan will remove, as the confirmation names it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Planned {
+    pub tech_name: String,
+    pub path: String,
+    /// The file or folder name that goes to the bin.
+    pub file_name: String,
+    /// "zip" | "dir"
+    pub kind: String,
+    /// It's on now (an active library mod, or a loose mod the game loads): parked first.
+    pub on: bool,
+}
+
+/// What a plan found: the mods it will remove, and why any asked for won't be (one line each,
+/// starting with the tech name).
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalPlan {
+    pub items: Vec<Planned>,
+    pub refused: Vec<String>,
+}
+
+/// What was true of a planned mod's entry when the user confirmed, compared again before anything
+/// moves: the entry's file number, kind, size and time, a folder's listing (every entry's path,
+/// kind, size and time), and each folder it depends on, resolved, with its file number.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Evidence {
+    entry: Option<(u64, u64)>,
+    kind: &'static str,
+    size: u64,
+    mtime_ms: u64,
+    listing: Vec<(String, bool, u64, u64)>,
+    roots: Vec<(PathBuf, Option<(u64, u64)>)>,
+}
+
+/// What became of one item the bin was asked to take.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Binned {
+    /// In the Recycle Bin / Trash.
+    Recycled,
+    /// Still where it was; why.
+    Kept(String),
+    /// Gone from its folder, but not confirmed in the bin; what's known.
+    Unsure(String),
+}
+
+/// One mod that went, as it was asked for.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Removed {
@@ -27,8 +73,8 @@ pub struct Removed {
     pub path: String,
 }
 
-/// What a removal did: what went to the Recycle Bin, why any didn't (one line each, starting with
-/// the tech name), and anything else worth saying (where parking kept an edited copy).
+/// What carrying out a plan did: what went to the bin, why any didn't (one line each, starting
+/// with the tech name), and anything else worth saying (where parking kept an edited copy).
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveReport {
@@ -40,69 +86,105 @@ pub struct RemoveReport {
 /// Names in the mods folder that are Silo's own, never a mod to remove.
 const RESERVED: &[&str] = &[ARCHIVE, "backups"];
 
-/// Move each item's file or folder to the Recycle Bin with `trash`.
+/// Check each request and record what it is.
+/// - A library mod is an organized row of that tech name whose archived copy is at the path: the
+///   archive reachable, the copy really there (not a link, its category folder not a link and
+///   directly in the archive, the default archive not a link either), and the row's kind.
+/// - A mod that isn't filed is the named mod itself directly in the mods folder: a zip named after
+///   it, or a folder of that name holding `modDesc.xml`; not a link, not one of Silo's own folders,
+///   and not Silo's copy of a library mod (or one Silo can't tell).
 ///
-/// Every item is checked before anything is parked or moved:
-/// - a library mod is an organized row of that tech name and kind whose archived copy is at the
-///   item's path, really there (not a link, its category folder not a link and directly in the
-///   archive, the default archive not a link either);
-/// - a mod that isn't filed is the named mod itself directly in the mods folder: a zip named after
-///   it, or a folder of that name holding `modDesc.xml`, not a link, not one of Silo's own folders;
-/// - either way it's still the kind, size and modified time the confirmation showed.
-///
-/// Then the active library mods among them are parked in one pass, as a switch would, and each
-/// goes only once nothing of Silo's is left at its name (a slot Silo can't inspect refuses); its
-/// row and projection record are then dropped. A loose mod that's Silo's copy of a library mod is
-/// refused. Anything Silo can't check is refused. `archive_ok`: the library archive is reachable.
-/// Per-tech-name details Silo keeps elsewhere (favorite, notes, source page) stay, as they do for
-/// the same mod in another mods folder.
-pub fn remove_from_library(
+/// Each path once. Returns the plan to show and each planned mod's evidence.
+pub fn plan_removal(
     conn: &Connection,
     layout: &Layout,
-    items: &[RemoveItem],
+    requests: &[RemoveRequest],
     archive_ok: bool,
-    trash: &dyn Fn(&Path) -> Result<(), String>,
+) -> (RemovalPlan, Vec<(Planned, Evidence)>) {
+    let key = crate::modsroot::canonical_key(&layout.mods);
+    let mut plan = RemovalPlan::default();
+    let mut found = Vec::new();
+    let rows = match db::try_load_organized(conn, &key) {
+        Ok(rows) => rows,
+        Err(e) => {
+            for r in requests {
+                plan.refused.push(format!(
+                    "{}: Silo couldn't read its library records ({e}), so it won't remove it.",
+                    r.tech_name
+                ));
+            }
+            return (plan, found);
+        }
+    };
+    let mut seen = HashSet::new();
+    for r in requests.iter().filter(|r| seen.insert(r.path.clone())) {
+        match check(layout, &rows, r, archive_ok) {
+            Ok(pair) => {
+                plan.items.push(pair.0.clone());
+                found.push(pair);
+            }
+            Err(why) => plan.refused.push(format!("{}: {why}", r.tech_name)),
+        }
+    }
+    (plan, found)
+}
+
+/// Remove the planned mods: each is checked again and must match its evidence, or it's refused
+/// before anything is parked or moved. Then the active library mods among them are parked in one
+/// pass, as a switch would, and each goes only once nothing of Silo's is left at its name (a slot
+/// Silo can't inspect refuses). `bin` moves an item and says what became of it. A library mod's
+/// row and projection record are dropped once its archived copy is gone from the archive.
+/// Per-tech-name details Silo keeps elsewhere (favorite, notes, source page) stay, as they do for
+/// the same mod in another mods folder.
+pub fn carry_out(
+    conn: &Connection,
+    layout: &Layout,
+    planned: &[(Planned, Evidence)],
+    archive_ok: bool,
+    bin: &dyn Fn(&Path) -> Binned,
 ) -> RemoveReport {
     let key = crate::modsroot::canonical_key(&layout.mods);
     let mut rep = RemoveReport::default();
     let rows = match db::try_load_organized(conn, &key) {
         Ok(rows) => rows,
         Err(e) => {
-            for it in items {
+            for (p, _) in planned {
                 rep.errors.push(format!(
                     "{}: Silo couldn't read its library records ({e}), so it didn't remove it.",
-                    it.tech_name
+                    p.tech_name
                 ));
             }
             return rep;
         }
     };
-    let filed = |it: &RemoveItem| {
-        rows.iter().find(|r| {
-            r.tech_name == it.tech_name
-                && archive_path(&layout.archive, &r.category, &r.file_name) == Path::new(&it.path)
-        })
-    };
 
-    // Check every item first (each path once): one that fails isn't parked either.
-    let mut seen = HashSet::new();
-    let mut ready: Vec<(&RemoveItem, Option<&OrganizedRow>, PathBuf)> = Vec::new();
-    for it in items.iter().filter(|it| seen.insert(it.path.clone())) {
-        let row = filed(it);
-        let checked = match row {
-            Some(row) => check_library(layout, row, it, archive_ok),
-            None => check_loose(layout, &rows, it),
+    // Everything again, against what was confirmed: one that changed isn't parked either.
+    let mut ready: Vec<(&Planned, Option<OrganizedRow>, PathBuf)> = Vec::new();
+    for (p, confirmed) in planned {
+        let request = RemoveRequest {
+            tech_name: p.tech_name.clone(),
+            path: p.path.clone(),
         };
-        match checked {
-            Ok(path) => ready.push((it, row, path)),
-            Err(why) => rep.errors.push(format!("{}: {why}", it.tech_name)),
+        match check(layout, &rows, &request, archive_ok) {
+            Ok((now, evidence)) if now == *p && evidence == *confirmed => {
+                let row = library_row(layout, &rows, &request).cloned();
+                ready.push((p, row, PathBuf::from(&p.path)));
+            }
+            Ok(_) => rep.errors.push(format!(
+                "{}: it changed since you confirmed, so Silo left it. Try again to remove it as it is now.",
+                p.tech_name
+            )),
+            Err(why) => rep.errors.push(format!("{}: {why}", p.tech_name)),
         }
     }
 
-    // Park the active library mods among them in one pass, as a switch would.
     let leaving: HashSet<&str> = ready
         .iter()
-        .filter_map(|(_, row, _)| row.filter(|r| r.active).map(|r| r.tech_name.as_str()))
+        .filter_map(|(_, row, _)| {
+            row.as_ref()
+                .filter(|r| r.active)
+                .map(|r| r.tech_name.as_str())
+        })
         .collect();
     let mut park_errors: Vec<String> = Vec::new();
     if !leaving.is_empty() {
@@ -117,34 +199,46 @@ pub fn remove_from_library(
         rep.notices.extend(parked.notices);
     }
 
-    for (it, row, path) in ready {
-        let name = it.tech_name.as_str();
-        if let Some(row) = row {
+    for (p, row, path) in ready {
+        let name = p.tech_name.as_str();
+        if let Some(row) = &row {
             if let Err(why) = slot_clear(layout, row, &park_errors) {
                 rep.errors.push(format!("{name}: {why}"));
                 continue;
             }
         }
-        if let Err(e) = trash(&path) {
-            let still = if row.is_some() {
-                " It's parked in your library."
-            } else {
-                ""
-            };
-            rep.errors.push(format!(
-                "{name}: couldn't move it to the Recycle Bin ({e}).{still}"
-            ));
-            continue;
-        }
-        crate::fslog::changed("trash", &path);
-        rep.removed.push(Removed {
-            tech_name: name.to_string(),
-            path: it.path.clone(),
-        });
-        if let Some(row) = row {
+        let gone = match bin(&path) {
+            Binned::Recycled => {
+                crate::fslog::changed("trash", &path);
+                rep.removed.push(Removed {
+                    tech_name: name.to_string(),
+                    path: p.path.clone(),
+                });
+                true
+            }
+            Binned::Kept(why) => {
+                let still = if row.is_some() {
+                    " It's still in your library, parked."
+                } else {
+                    ""
+                };
+                rep.errors.push(format!("{name}: {why}.{still}"));
+                false
+            }
+            Binned::Unsure(what) => {
+                crate::fslog::changed("trash?", &path);
+                rep.errors.push(format!(
+                    "{name}: {what}. Look in the Recycle Bin for {}.",
+                    p.file_name
+                ));
+                true
+            }
+        };
+        // Gone from the archive either way: its records go too.
+        if let (true, Some(row)) = (gone, &row) {
             if let Err(e) = db::drop_library_row(conn, &key, &row.tech_name, &row.file_name) {
                 rep.errors.push(format!(
-                    "{name}: moved to the Recycle Bin, but Silo couldn't update its library records ({e}). Re-read every mod in Settings → Maintenance to tidy them."
+                    "{name}: Silo couldn't update its library records ({e}). Re-read every mod in Settings → Maintenance to tidy them."
                 ));
             }
         }
@@ -152,35 +246,139 @@ pub fn remove_from_library(
     rep
 }
 
-/// Library mod `row` (asked for as `it`) may go, before parking: the archive is reachable, the
-/// item is the row's kind, and the archived copy is really in its category folder of the archive,
-/// as confirmed. Returns the archived copy.
+/// The library row `r` names: its tech name, with its archived copy at the path.
+fn library_row<'a>(
+    layout: &Layout,
+    rows: &'a [OrganizedRow],
+    r: &RemoveRequest,
+) -> Option<&'a OrganizedRow> {
+    rows.iter().find(|row| {
+        row.tech_name == r.tech_name
+            && archive_path(&layout.archive, &row.category, &row.file_name) == Path::new(&r.path)
+    })
+}
+
+/// Check one request (see [`plan_removal`]) and gather its evidence.
+fn check(
+    layout: &Layout,
+    rows: &[OrganizedRow],
+    r: &RemoveRequest,
+    archive_ok: bool,
+) -> Result<(Planned, Evidence), String> {
+    match library_row(layout, rows, r) {
+        Some(row) => check_library(layout, row, r, archive_ok),
+        None => check_loose(layout, rows, r),
+    }
+}
+
 fn check_library(
     layout: &Layout,
     row: &OrganizedRow,
-    it: &RemoveItem,
+    r: &RemoveRequest,
     archive_ok: bool,
-) -> Result<PathBuf, String> {
+) -> Result<(Planned, Evidence), String> {
     if !archive_ok {
-        return Err("your library archive isn't reachable, so Silo didn't remove it.".into());
-    }
-    if it.kind != row.kind {
-        return Err("it changed since you confirmed, so Silo left it. Try again.".into());
+        return Err("your library archive isn't reachable, so Silo won't remove it.".into());
     }
     if layout.archive_is_default() && is_link(&layout.archive) != Some(false) {
         return Err(
-            "your library archive folder is a link or can't be read, so Silo left it.".into(),
+            "your library archive folder is a link or can't be read, so Silo won't remove it."
+                .into(),
         );
     }
     let src = archive_path(&layout.archive, &row.category, &row.file_name);
-    let category_dir = src.parent().and_then(|p| p.file_name()).unwrap_or_default();
-    really_at(
-        &src,
-        &layout.archive.join(category_dir),
-        Some(&layout.archive),
-    )?;
-    as_confirmed(&src, it)?;
-    Ok(src)
+    let category = src.parent().map(Path::to_path_buf).unwrap_or_default();
+    really_at(&src, &category, Some(&layout.archive))?;
+    let evidence = evidence_of(&src, &[&layout.mods, &layout.archive, &category])?;
+    if evidence.kind != row.kind {
+        return Err(format!(
+            "{} isn't the kind of mod Silo filed, so Silo left it.",
+            row.file_name
+        ));
+    }
+    Ok((
+        Planned {
+            tech_name: row.tech_name.clone(),
+            // As asked for, so the Library can match the result to its row.
+            path: r.path.clone(),
+            file_name: row.file_name.clone(),
+            kind: row.kind.clone(),
+            on: row.active,
+        },
+        evidence,
+    ))
+}
+
+fn check_loose(
+    layout: &Layout,
+    rows: &[OrganizedRow],
+    r: &RemoveRequest,
+) -> Result<(Planned, Evidence), String> {
+    let given = Path::new(&r.path);
+    let name = given
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::paths::safe_file_name(&name)?;
+    let path = layout.mods.join(&name);
+    if path != given {
+        return Err("it isn't in your mods folder or your library, so Silo left it alone.".into());
+    }
+    if RESERVED.iter().any(|x| name.eq_ignore_ascii_case(x)) || crate::scan::is_silo_temp(&name) {
+        return Err(format!(
+            "{name} is Silo's own, not a mod, so Silo left it alone."
+        ));
+    }
+    let meta = path
+        .symlink_metadata()
+        .map_err(|_| format!("{name} is no longer there."))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "{name} is a link, not the mod itself, so Silo left it. Remove it yourself if you like."
+        ));
+    }
+    let kind = if meta.is_dir() { "dir" } else { "zip" };
+    let is_it = if meta.is_dir() {
+        name.eq_ignore_ascii_case(&r.tech_name) && path.join("modDesc.xml").is_file()
+    } else {
+        name.len() > 4
+            && name[name.len() - 4..].eq_ignore_ascii_case(".zip")
+            && name[..name.len() - 4].eq_ignore_ascii_case(&r.tech_name)
+    };
+    if !is_it {
+        return Err(format!("{name} isn't that mod, so Silo left it alone."));
+    }
+    really_at(&path, &layout.mods, None)?;
+    for row in rows
+        .iter()
+        .filter(|row| row.file_name.eq_ignore_ascii_case(&name))
+    {
+        let src = archive_path(&layout.archive, &row.category, &row.file_name);
+        match projection_verdict(&path, &src, kind) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(format!(
+                    "{name} is Silo's copy of a mod in your library. Remove that mod from the library instead."
+                ))
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Silo couldn't tell whether {name} is its copy of a mod in your library ({e}), so it left it alone."
+                ))
+            }
+        }
+    }
+    let evidence = evidence_of(&path, &[&layout.mods])?;
+    Ok((
+        Planned {
+            tech_name: r.tech_name.clone(),
+            path: path.to_string_lossy().into_owned(),
+            file_name: name,
+            kind: kind.into(),
+            on: true, // a mod in the mods folder is one the game loads
+        },
+        evidence,
+    ))
 }
 
 /// After parking: nothing of Silo's is left at library mod `row`'s name. Parking reported no
@@ -210,74 +408,6 @@ fn slot_clear(layout: &Layout, row: &OrganizedRow, park_errors: &[String]) -> Re
     }
 }
 
-/// A mod that isn't filed may go: the named mod itself (a zip named after it, or a folder of that
-/// name holding `modDesc.xml`) directly in the mods folder, not one of Silo's own folders, not a
-/// link (a link is the user's to remove), not Silo's own copy of a library mod at that name (or
-/// one Silo can't tell), and as confirmed. Returns its path.
-fn check_loose(layout: &Layout, rows: &[OrganizedRow], it: &RemoveItem) -> Result<PathBuf, String> {
-    let given = Path::new(&it.path);
-    let name = given
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    crate::paths::safe_file_name(&name)?;
-    let path = layout.mods.join(&name);
-    if path != given {
-        return Err("it isn't in your mods folder or your library, so Silo left it alone.".into());
-    }
-    if RESERVED.iter().any(|r| name.eq_ignore_ascii_case(r)) || crate::scan::is_silo_temp(&name) {
-        return Err(format!(
-            "{name} is Silo's own, not a mod, so Silo left it alone."
-        ));
-    }
-    let meta = path
-        .symlink_metadata()
-        .map_err(|_| format!("{name} is no longer there."))?;
-    if meta.file_type().is_symlink() {
-        return Err(format!(
-            "{name} is a link, not the mod itself, so Silo left it. Remove it yourself if you like."
-        ));
-    }
-    let kind = if meta.is_dir() { "dir" } else { "zip" };
-    let is_it = if meta.is_dir() {
-        name.eq_ignore_ascii_case(&it.tech_name) && path.join("modDesc.xml").is_file()
-    } else {
-        name.len() > 4
-            && name[name.len() - 4..].eq_ignore_ascii_case(".zip")
-            && name[..name.len() - 4].eq_ignore_ascii_case(&it.tech_name)
-    };
-    if !is_it {
-        return Err(format!("{name} isn't that mod, so Silo left it alone."));
-    }
-    if it.kind != kind {
-        return Err(format!(
-            "{name} changed since you confirmed, so Silo left it. Try again."
-        ));
-    }
-    really_at(&path, &layout.mods, None)?;
-    for r in rows
-        .iter()
-        .filter(|r| r.file_name.eq_ignore_ascii_case(&name))
-    {
-        let src = archive_path(&layout.archive, &r.category, &r.file_name);
-        match projection_verdict(&path, &src, kind) {
-            Ok(false) => {}
-            Ok(true) => {
-                return Err(format!(
-                    "{name} is Silo's copy of a mod in your library. Remove that mod from the library instead."
-                ))
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Silo couldn't tell whether {name} is its copy of a mod in your library ({e}), so it left it alone."
-                ))
-            }
-        }
-    }
-    as_confirmed(&path, it)?;
-    Ok(path)
-}
-
 /// Whether `p` is a link (Some), or None when it can't be read.
 fn is_link(p: &Path) -> Option<bool> {
     p.symlink_metadata()
@@ -286,8 +416,7 @@ fn is_link(p: &Path) -> Option<bool> {
 }
 
 /// `entry` is itself a real file or folder (not a link) whose folder, resolved, is `folder`
-/// resolved. With `within`, `folder` must also not be a link and resolve directly inside it, so a
-/// category folder swapped for a link can't send the move somewhere else.
+/// resolved. With `within`, `folder` must also not be a link and resolve directly inside it.
 fn really_at(entry: &Path, folder: &Path, within: Option<&Path>) -> Result<(), String> {
     let name = entry
         .file_name()
@@ -320,25 +449,60 @@ fn really_at(entry: &Path, folder: &Path, within: Option<&Path>) -> Result<(), S
     Ok(())
 }
 
-/// The entry is still the kind, size and modified time the confirmation showed (read as the scan
-/// reads them).
-fn as_confirmed(path: &Path, it: &RemoveItem) -> Result<(), String> {
-    let name = path
+/// What `entry` is now (see [`Evidence`]), with `roots` resolved and numbered.
+fn evidence_of(entry: &Path, roots: &[&Path]) -> Result<Evidence, String> {
+    let name = entry
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let meta = std::fs::metadata(path).map_err(|e| format!("Silo couldn't check {name} ({e})."))?;
-    let now_ms = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let kind = if meta.is_dir() { "dir" } else { "zip" };
-    if kind != it.kind || meta.len() != it.size || now_ms != it.mtime_ms {
-        return Err(format!(
-            "{name} changed since you confirmed, so Silo left it. Try again to remove it as it is now."
-        ));
+    let unreadable =
+        |e: std::io::Error| format!("Silo couldn't check {name} ({e}), so it left it alone.");
+    let meta = entry.symlink_metadata().map_err(unreadable)?;
+    let stamp = |m: &std::fs::Metadata| {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    };
+    let mut listing = Vec::new();
+    if meta.is_dir() {
+        for e in walkdir::WalkDir::new(entry)
+            .follow_links(false)
+            .min_depth(1)
+            .sort_by_file_name()
+        {
+            let e =
+                e.map_err(|e| format!("Silo couldn't read {name} ({e}), so it left it alone."))?;
+            let m = e
+                .metadata()
+                .map_err(|e| format!("Silo couldn't read {name} ({e}), so it left it alone."))?;
+            let rel = e
+                .path()
+                .strip_prefix(entry)
+                .unwrap_or(e.path())
+                .to_string_lossy()
+                .into_owned();
+            listing.push((
+                rel,
+                m.is_dir(),
+                if m.is_dir() { 0 } else { m.len() },
+                stamp(&m),
+            ));
+        }
     }
-    Ok(())
+    let mut numbered = Vec::new();
+    for r in roots {
+        let real = std::fs::canonicalize(r).map_err(unreadable)?;
+        let number = crate::scratch::entry_number(&real);
+        numbered.push((real, number));
+    }
+    Ok(Evidence {
+        entry: crate::scratch::entry_number(entry),
+        kind: if meta.is_dir() { "dir" } else { "zip" },
+        size: if meta.is_dir() { 0 } else { meta.len() },
+        mtime_ms: stamp(&meta),
+        listing,
+        roots: numbered,
+    })
 }

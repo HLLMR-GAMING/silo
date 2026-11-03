@@ -17,6 +17,7 @@ import type {
   TagRow,
   ModInput,
   OrganizeReport,
+  RemovalPlan,
   RemoveReport,
   PlannedMove,
   VerifyResult,
@@ -441,13 +442,16 @@ export function setActive(active: string[], touched?: string[]): Promise<Organiz
   return invoke<OrganizeReport>("set_active", { root: null, active, touched: touched ?? null });
 }
 
-/** Remove mods from the library (#429): files to the Recycle Bin, active library mods parked
- *  first. `path`, `kind`, `size` and `mtimeMs` are what the confirmation was shown for (the
- *  scan's), so an entry changed since is refused. */
-export function removeFromLibrary(
-  items: { techName: string; path: string; kind: "zip" | "dir"; size: number; mtimeMs: number }[],
-): Promise<RemoveReport> {
-  return invoke<RemoveReport>("remove_from_library", { items });
+/** Remove from library, step one (#429): check the mods (by the path the Library shows) and note
+ *  what each is. Nothing changes. Returns the plan's id and what it will remove. */
+export function planRemoval(items: { techName: string; path: string }[]): Promise<[number, RemovalPlan]> {
+  return invoke<[number, RemovalPlan]>("plan_removal", { items });
+}
+
+/** Remove from library, step two (#429): carry out the confirmed plan. Files go to the Recycle
+ *  Bin, active library mods are parked first, and anything changed since the plan is refused. */
+export function removeFromLibrary(planId: number): Promise<RemoveReport> {
+  return invoke<RemoveReport>("remove_from_library", { planId });
 }
 
 export function flatten(): Promise<OrganizeReport> {

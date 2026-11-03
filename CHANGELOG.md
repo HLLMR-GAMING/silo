@@ -10,12 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Remove from library.** A mod's drawer menu now has **Remove from library…**, and the
-  Library's selection bar has **Remove…**. After a confirmation that names the mods (Cancel is the default), the
-  mod's file or folder goes to the Recycle Bin (the Trash on macOS and Linux), so you can restore
-  it from there; Silo never deletes it outright. A mod that's on is parked first. Mods you haven't
-  filed into the library can be removed too. A mod set that lists a removed mod keeps it and shows
-  it as not in your library. A link in your mods folder, or Silo's own copy of a library mod, is
-  left for you to handle. (#429)
+  Library's selection bar has **Remove…**. After a confirmation that names the mods (Cancel is the
+  default), each mod's file or folder goes to the Recycle Bin (the Trash on macOS and Linux), so
+  you can restore it from there. Where the Recycle Bin can't take it (a USB stick or network drive,
+  the bin turned off or too small), Silo leaves it and says so. A mod that's on is parked first.
+  Mods you haven't filed into the library can be removed too. Anything that changed after you
+  confirmed is left alone. A mod set that lists a removed mod keeps it and shows it as not in your
+  library. A link in your mods folder, or Silo's own copy of a library mod, is left for you to
+  handle. (#429)
 
 ### Fixed
 

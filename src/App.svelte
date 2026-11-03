@@ -32,6 +32,7 @@
     planOrganize,
     applyOrganize,
     setActive,
+    planRemoval,
     removeFromLibrary,
     safeFirstDialog,
     flatten,
@@ -102,6 +103,7 @@
   } from "./lib/configSchemas";
   import type {
     ModEntry,
+    RemovalPlan,
     RemoveReport,
     ScanResult,
     CurationRow,
@@ -2722,24 +2724,33 @@
       return;
     }
     const windows = isWindowsPlatform();
-    const removing = list.map((m) => ({
-      techName: m.techName,
-      path: m.path,
-      title: m.title,
-      fileName: fileName(m.path),
-      kind: m.kind,
-      on: isOn(m),
-    }));
+    const failed = (lines: string[]) => {
+      const more = lines.length > 3 ? ` (and ${lines.length - 3} more)` : "";
+      reportError(lines.slice(0, 3).join("; ") + more, "Removing mods from the library");
+    };
+    // Step one: Silo checks each mod and notes what it is; the confirmation names what it found.
+    let planned: [number, RemovalPlan];
+    try {
+      planned = await planRemoval(list.map((m) => ({ techName: m.techName, path: m.path })));
+    } catch (e) {
+      reportError(e, "Removing mods from the library");
+      return;
+    }
+    const [planId, plan] = planned;
+    if (plan.items.length === 0) {
+      if (plan.refused.length > 0) failed(plan.refused);
+      return;
+    }
+    const titles = new Map(list.map((m) => [m.path, m.title]));
+    const removing = plan.items.map((p) => ({ ...p, title: titles.get(p.path) ?? null }));
     if (!(await safeFirstDialog(removeConfirmText(removing, windows), { safe: "Cancel", verb: removeVerb(windows) })))
       return;
-    const op = beginWrite(list.length === 1 ? "Removing a mod" : `Removing ${modsCount(list.length)}`);
+    // Step two: anything that changed since is refused before it's touched.
+    const op = beginWrite(plan.items.length === 1 ? "Removing a mod" : `Removing ${modsCount(plan.items.length)}`);
     if (!op) return;
     let rep: RemoveReport | null = null;
     try {
-      // Each goes with what the confirmation showed: changed since, it's refused.
-      rep = await removeFromLibrary(
-        list.map((m) => ({ techName: m.techName, path: m.path, kind: m.kind, size: m.size, mtimeMs: m.mtimeMs })),
-      );
+      rep = await removeFromLibrary(planId);
     } catch (e) {
       reportError(e, "Removing mods from the library");
     } finally {
@@ -2753,10 +2764,8 @@
     const done = removedText(rep.removed, removing, windows);
     if (done) success(done);
     if (rep.notices.length > 0) info(rep.notices.join(" "), { duration: 10_000 });
-    if (rep.errors.length > 0) {
-      const more = rep.errors.length > 3 ? ` (and ${rep.errors.length - 3} more)` : "";
-      reportError(rep.errors.slice(0, 3).join("; ") + more, "Removing mods from the library");
-    }
+    const problems = [...plan.refused, ...rep.errors];
+    if (problems.length > 0) failed(problems);
   }
 
   /**
