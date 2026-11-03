@@ -5,6 +5,8 @@ import { formatCount } from "./plural";
 /** What the wording needs to know about one mod being removed. */
 export interface RemovingMod {
   techName: string;
+  /** The path the Library shows (what the command reports back). */
+  path: string;
   title: string | null;
   /** The file or folder name Silo moves. */
   fileName: string;
@@ -51,14 +53,18 @@ export function removeVerb(windows: boolean): string {
 
 /**
  * The success toast for the mods that went, or null when none did.
- * @param removed tech names the command removed; @param mods what was asked, for their titles
+ * @param removed what the command removed (matched by path); @param mods what was asked
  */
-export function removedText(removed: string[], mods: RemovingMod[], windows: boolean): string | null {
+export function removedText(
+  removed: { techName: string; path: string }[],
+  mods: RemovingMod[],
+  windows: boolean,
+): string | null {
   if (removed.length === 0) return null;
   const bin = binName(windows);
   if (removed.length === 1) {
-    const m = mods.find((x) => x.techName === removed[0]);
-    return `Moved ${m ? name(m) : removed[0]} to the ${bin}.`;
+    const m = mods.find((x) => x.path === removed[0].path);
+    return `Moved ${m ? name(m) : removed[0].techName} to the ${bin}.`;
   }
   return `Moved ${formatCount(removed.length)} mods to the ${bin}.`;
 }

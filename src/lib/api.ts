@@ -442,8 +442,11 @@ export function setActive(active: string[], touched?: string[]): Promise<Organiz
 }
 
 /** Remove mods from the library (#429): files to the Recycle Bin, active library mods parked
- *  first. `path` is the path the Library shows for the mod. */
-export function removeFromLibrary(items: { techName: string; path: string }[]): Promise<RemoveReport> {
+ *  first. `path` is the path the Library shows for the mod; a zip's `size` and `mtimeMs` are the
+ *  ones the confirmation was shown for, so a file changed since is refused. */
+export function removeFromLibrary(
+  items: { techName: string; path: string; size?: number; mtimeMs?: number }[],
+): Promise<RemoveReport> {
   return invoke<RemoveReport>("remove_from_library", { items });
 }
 

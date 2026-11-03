@@ -3315,6 +3315,39 @@ async fn adopt_foreign_file(
     .map_err(error::AppError::from)
 }
 
+/// Move `p` to the Recycle Bin / Trash (#429). On Windows, only on a fixed drive: a removable,
+/// network or optical drive has no Recycle Bin, and Windows would delete the file outright, so
+/// that's refused. (Where recycling still isn't possible on a fixed drive, the Recycle Bin turned
+/// off or too small, Windows itself asks before deleting permanently, and saying no keeps it.)
+fn move_to_bin(p: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    if !on_fixed_drive(p) {
+        return Err("this drive has no Recycle Bin, so Silo won't remove it. Delete it yourself if you want it gone".into());
+    }
+    trash::delete(p).map_err(|e| e.to_string())
+}
+
+/// Whether `p` is on a fixed drive (one with a Recycle Bin). False when it can't be told.
+#[cfg(windows)]
+fn on_fixed_drive(p: &std::path::Path) -> bool {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut root = vec![0u16; 1024];
+    // SAFETY: both buffers are valid for the call; `wide` is NUL-terminated and `root` holds
+    // `root.len()` units.
+    let ok = unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) };
+    if ok == 0 {
+        return false;
+    }
+    let end = root.iter().position(|&c| c == 0).unwrap_or(root.len());
+    let root = std::ffi::OsString::from_wide(&root[..end]);
+    let root: Vec<u16> = root.encode_wide().chain(Some(0)).collect();
+    // SAFETY: `root` is a NUL-terminated volume path.
+    const DRIVE_FIXED: u32 = 3; // windows-sys WindowsProgramming::DRIVE_FIXED
+    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
+}
+
 /// Remove mods from the library (#429): each one's file or folder goes to the Recycle Bin / Trash,
 /// an active library mod is parked first. Refused while FS25 runs or a move is under way. The
 /// caller rescans afterward.
@@ -3326,16 +3359,16 @@ async fn remove_from_library(
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::RemoveReport, String> {
-        if gamelaunch::fs25_running() {
+        let _write = library_write()?;
+        // Checked once the write is ours: waiting for it can take a while, and the game may
+        // have started meanwhile.
+        if gamelaunch::fs25_running() || gamelaunch::profile_launch_pending() {
             return Err(REMOVE_GAME_RUNNING.into());
         }
-        let _write = library_write()?;
         let (layout, _) = active_layout()?;
         let conn = db::open(&db)?;
         let archive_ok = ensure_archive_available().is_ok();
-        let rep = organize::remove_from_library(&conn, &layout, &items, archive_ok, &|p| {
-            trash::delete(p).map_err(|e| e.to_string())
-        });
+        let rep = organize::remove_from_library(&conn, &layout, &items, archive_ok, &move_to_bin);
         log::info!(
             "removed {} mod(s) from the library to the Recycle Bin ({} not removed)",
             rep.removed.len(),

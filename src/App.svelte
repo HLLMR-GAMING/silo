@@ -2724,6 +2724,7 @@
     const windows = isWindowsPlatform();
     const removing = list.map((m) => ({
       techName: m.techName,
+      path: m.path,
       title: m.title,
       fileName: fileName(m.path),
       kind: m.kind,
@@ -2735,19 +2736,27 @@
     if (!op) return;
     let rep: RemoveReport | null = null;
     try {
-      rep = await removeFromLibrary(list.map((m) => ({ techName: m.techName, path: m.path })));
+      // A zip goes with the size and time shown in the confirmation: changed since, it's refused.
+      rep = await removeFromLibrary(
+        list.map((m) =>
+          m.kind === "zip"
+            ? { techName: m.techName, path: m.path, size: m.size, mtimeMs: m.mtimeMs }
+            : { techName: m.techName, path: m.path },
+        ),
+      );
     } catch (e) {
       reportError(e, "Removing mods from the library");
     } finally {
       op.end();
     }
     if (!rep) return;
-    const gone = new Set(rep.removed);
-    if (detailMod && gone.has(detailMod.techName) && list.some((m) => m.path === detailMod?.path)) detailMod = null;
+    const gone = new Set(rep.removed.map((r) => r.path));
+    if (detailMod && gone.has(detailMod.path)) detailMod = null;
     if (gone.size > 0) selection.clear();
     await runScan(false);
     const done = removedText(rep.removed, removing, windows);
     if (done) success(done);
+    if (rep.notices.length > 0) info(rep.notices.join(" "), { duration: 10_000 });
     if (rep.errors.length > 0) {
       const more = rep.errors.length > 3 ? ` (and ${rep.errors.length - 3} more)` : "";
       reportError(rep.errors.slice(0, 3).join("; ") + more, "Removing mods from the library");

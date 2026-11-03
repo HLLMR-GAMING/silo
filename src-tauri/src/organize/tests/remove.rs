@@ -14,7 +14,30 @@ fn item(tech: &str, path: &Path) -> RemoveItem {
     RemoveItem {
         tech_name: tech.into(),
         path: path.to_string_lossy().into_owned(),
+        size: None,
+        mtime_ms: None,
     }
+}
+
+/// `item` with the size and modified time the scan would have shown for `path` now.
+fn confirmed(tech: &str, path: &Path) -> RemoveItem {
+    let m = std::fs::metadata(path).unwrap();
+    let ms = m
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    RemoveItem {
+        size: Some(m.len()),
+        mtime_ms: Some(ms),
+        ..item(tech, path)
+    }
+}
+
+/// A Recycle Bin that must never be reached.
+fn no_bin(p: &Path) -> Result<(), String> {
+    panic!("moved {} to the bin", p.display())
 }
 
 /// A mods folder with `FS25_Foo` filed under Vehicles; active means linked into the mods folder.
@@ -48,7 +71,13 @@ fn removing_a_parked_library_mod_bins_its_archived_copy_and_drops_its_row() {
         &bin_at(&bin),
     );
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
-    assert_eq!(rep.removed, vec!["FS25_Foo".to_string()]);
+    assert_eq!(
+        rep.removed,
+        vec![Removed {
+            tech_name: "FS25_Foo".into(),
+            path: src.to_string_lossy().into_owned()
+        }]
+    );
     assert!(!src.exists());
     assert_eq!(
         std::fs::read(bin.join("FS25_Foo.zip")).unwrap(),
@@ -263,5 +292,124 @@ fn a_loose_link_is_left_alone() {
     assert!(rep.removed.is_empty());
     assert!(rep.errors[0].contains("is a link"), "{:?}", rep.errors);
     assert!(target.is_dir());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_loose_item_must_be_the_named_mod() {
+    let base = temp_dir_for("rm_notit");
+    let mods = base.join("mods");
+    std::fs::create_dir_all(mods.join("backups")).unwrap();
+    std::fs::write(mods.join("backups/FS25_Old.zip.1.bak"), b"PK").unwrap();
+    std::fs::create_dir_all(mods.join("FS25_NoDesc")).unwrap();
+    std::fs::write(mods.join("FS25_Other.zip"), b"PK other").unwrap();
+    std::fs::write(mods.join("notes.txt"), b"hi").unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let rep = remove_from_library(
+        &conn,
+        &layout,
+        &[
+            item("FS25_Foo", &mods.join("backups")),
+            item("FS25_Foo", &mods.join("FS25_Other.zip")),
+            item("FS25_NoDesc", &mods.join("FS25_NoDesc")),
+            item("notes", &mods.join("notes.txt")),
+        ],
+        true,
+        &no_bin,
+    );
+    assert!(rep.removed.is_empty());
+    assert_eq!(rep.errors.len(), 4, "{:?}", rep.errors);
+    assert!(
+        rep.errors.iter().all(|e| e.contains("isn't that mod")),
+        "{:?}",
+        rep.errors
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_zip_changed_since_confirmed_is_left() {
+    let base = temp_dir_for("rm_changed");
+    let mods = base.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let zip = mods.join("FS25_Loose.zip");
+    std::fs::write(&zip, b"PK the build you saw").unwrap();
+    let seen = confirmed("FS25_Loose", &zip);
+    std::fs::write(&zip, b"PK another build put here meanwhile").unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let rep = remove_from_library(&conn, &layout, &[seen], true, &no_bin);
+    assert!(rep.removed.is_empty());
+    assert!(
+        rep.errors[0].contains("changed since you confirmed"),
+        "{:?}",
+        rep.errors
+    );
+    // As it is now, it goes.
+    let bin = base.join("bin");
+    let rep = remove_from_library(
+        &conn,
+        &layout,
+        &[confirmed("FS25_Loose", &zip)],
+        true,
+        &bin_at(&bin),
+    );
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert!(bin.join("FS25_Loose.zip").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn the_same_path_twice_is_removed_once() {
+    let (base, conn, layout, src) = library_with_foo("rm_twice", false);
+    let bin = base.join("bin");
+    let rep = remove_from_library(
+        &conn,
+        &layout,
+        &[item("FS25_Foo", &src), item("FS25_Foo", &src)],
+        true,
+        &bin_at(&bin),
+    );
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.removed.len(), 1);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_category_folder_swapped_for_a_link_is_refused() {
+    // The archived copy's category folder replaced by a link to somewhere else holding a file of
+    // that name: the move would land outside the library.
+    let (base, conn, layout, src) = library_with_foo("rm_catlink", false);
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("FS25_Foo.zip"), b"not the library's").unwrap();
+    let cat = src.parent().unwrap().to_path_buf();
+    std::fs::remove_dir_all(&cat).unwrap();
+    std::os::unix::fs::symlink(&outside, &cat).unwrap();
+    let rep = remove_from_library(&conn, &layout, &[item("FS25_Foo", &src)], true, &no_bin);
+    assert!(rep.removed.is_empty());
+    assert!(
+        rep.errors[0].contains("isn't where Silo expects it"),
+        "{:?}",
+        rep.errors
+    );
+    assert!(outside.join("FS25_Foo.zip").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_archived_copy_that_is_a_link_is_refused() {
+    let (base, conn, layout, src) = library_with_foo("rm_leaflink", false);
+    let outside = base.join("elsewhere.zip");
+    std::fs::write(&outside, b"PK elsewhere").unwrap();
+    std::fs::remove_file(&src).unwrap();
+    std::os::unix::fs::symlink(&outside, &src).unwrap();
+    let rep = remove_from_library(&conn, &layout, &[item("FS25_Foo", &src)], true, &no_bin);
+    assert!(rep.removed.is_empty());
+    assert!(rep.errors[0].contains("is a link"), "{:?}", rep.errors);
+    assert!(outside.is_file());
     let _ = std::fs::remove_dir_all(&base);
 }

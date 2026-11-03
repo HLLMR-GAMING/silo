@@ -92,10 +92,12 @@ export interface ModInput {
 
 /** What removing mods from the library did (#429). */
 export interface RemoveReport {
-  /** Tech names whose file went to the Recycle Bin. */
-  removed: string[];
+  /** The mods whose file or folder went to the Recycle Bin, as asked for. */
+  removed: { techName: string; path: string }[];
   /** Why the others didn't, one line each ("FS25_X: …"). */
   errors: string[];
+  /** Anything else to tell (where parking kept an edited copy). */
+  notices: string[];
 }
 
 export interface OrganizeReport {

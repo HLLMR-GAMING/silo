@@ -9,6 +9,7 @@ import {
 } from "./removeMods";
 
 const zip = (t: string, on = false): RemovingMod => ({
+  path: `C:/mods/archive/Vehicles/FS25_${t}.zip`,
   techName: `FS25_${t}`,
   title: t,
   fileName: `FS25_${t}.zip`,
@@ -28,6 +29,7 @@ describe("removeConfirmText", () => {
 
   it("names a folder mod's folder", () => {
     const folder: RemovingMod = {
+      path: "C:/mods/FS25_Shed",
       techName: "FS25_Shed",
       title: null,
       fileName: "FS25_Shed",
@@ -56,13 +58,18 @@ describe("removeConfirmText", () => {
 describe("removedText", () => {
   it("says what went where, or nothing when none went", () => {
     const mods = [zip("A"), zip("B")];
-    expect(removedText(["FS25_A"], mods, true)).toBe(
-      "Moved A to the Recycle Bin.",
-    );
-    expect(removedText(["FS25_A", "FS25_B"], mods, false)).toBe(
-      "Moved 2 mods to the Trash.",
-    );
+    const went = (m: RemovingMod) => ({ techName: m.techName, path: m.path });
+    expect(removedText([went(mods[0])], mods, true)).toBe("Moved A to the Recycle Bin.");
+    expect(removedText(mods.map(went), mods, false)).toBe("Moved 2 mods to the Trash.");
     expect(removedText([], mods, true)).toBeNull();
+  });
+
+  it("names the copy that went, by path, when two copies share a tech name (#421)", () => {
+    const parked = { ...zip("A"), title: "A (library copy)" };
+    const loose = { ...zip("A"), title: "A (folder)", path: "C:/mods/FS25_A", kind: "dir" as const };
+    expect(removedText([{ techName: "FS25_A", path: loose.path }], [parked, loose], true)).toBe(
+      "Moved A (folder) to the Recycle Bin.",
+    );
   });
 
   it("labels the bin and the button by platform", () => {
