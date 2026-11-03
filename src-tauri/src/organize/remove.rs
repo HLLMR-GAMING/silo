@@ -63,6 +63,8 @@ pub enum Binned {
     Kept(String),
     /// Gone from its folder, but not confirmed in the bin; what's known.
     Unsure(String),
+    /// Silo couldn't tell whether it's still there; why.
+    Unchecked(String),
 }
 
 /// One mod that went, as it was asked for.
@@ -232,6 +234,12 @@ pub fn carry_out(
                     p.file_name
                 ));
                 true
+            }
+            // Not known to be gone: its records stay, so nothing is lost track of.
+            Binned::Unchecked(why) => {
+                rep.errors
+                    .push(format!("{name}: {why}. It's still listed in your library."));
+                false
             }
         };
         // Gone from the archive either way: its records go too.
@@ -451,20 +459,34 @@ fn really_at(entry: &Path, folder: &Path, within: Option<&Path>) -> Result<(), S
 
 /// What `entry` is now (see [`Evidence`]), with `roots` resolved and numbered.
 fn evidence_of(entry: &Path, roots: &[&Path]) -> Result<Evidence, String> {
+    evidence_with(entry, roots, &crate::scratch::entry_number)
+}
+
+/// [`evidence_of`] with the file-number lookup given (a test passes one that fails). Every piece
+/// is required: an entry or folder whose file number or modified time can't be read refuses, so a
+/// missing piece can never compare equal to another missing one.
+fn evidence_with(
+    entry: &Path,
+    roots: &[&Path],
+    number_of: &dyn Fn(&Path) -> Option<(u64, u64)>,
+) -> Result<Evidence, String> {
     let name = entry
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let unreadable =
-        |e: std::io::Error| format!("Silo couldn't check {name} ({e}), so it left it alone.");
-    let meta = entry.symlink_metadata().map_err(unreadable)?;
-    let stamp = |m: &std::fs::Metadata| {
+    let refuse = |what: String| format!("Silo couldn't check {what}, so it left {name} alone.");
+    let meta = entry
+        .symlink_metadata()
+        .map_err(|e| refuse(format!("{name} ({e})")))?;
+    let stamp = |m: &std::fs::Metadata, what: &Path| -> Result<u64, String> {
         m.modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
+            .ok_or_else(|| refuse(format!("when {} changed", what.display())))
     };
+    let number =
+        |p: &Path| number_of(p).ok_or_else(|| refuse(format!("which file {} is", p.display())));
     let mut listing = Vec::new();
     if meta.is_dir() {
         for e in walkdir::WalkDir::new(entry)
@@ -472,11 +494,8 @@ fn evidence_of(entry: &Path, roots: &[&Path]) -> Result<Evidence, String> {
             .min_depth(1)
             .sort_by_file_name()
         {
-            let e =
-                e.map_err(|e| format!("Silo couldn't read {name} ({e}), so it left it alone."))?;
-            let m = e
-                .metadata()
-                .map_err(|e| format!("Silo couldn't read {name} ({e}), so it left it alone."))?;
+            let e = e.map_err(|e| refuse(format!("{name} ({e})")))?;
+            let m = e.metadata().map_err(|e| refuse(format!("{name} ({e})")))?;
             let rel = e
                 .path()
                 .strip_prefix(entry)
@@ -487,22 +506,45 @@ fn evidence_of(entry: &Path, roots: &[&Path]) -> Result<Evidence, String> {
                 rel,
                 m.is_dir(),
                 if m.is_dir() { 0 } else { m.len() },
-                stamp(&m),
+                stamp(&m, e.path())?,
             ));
         }
     }
     let mut numbered = Vec::new();
     for r in roots {
-        let real = std::fs::canonicalize(r).map_err(unreadable)?;
-        let number = crate::scratch::entry_number(&real);
-        numbered.push((real, number));
+        let real =
+            std::fs::canonicalize(r).map_err(|e| refuse(format!("{} ({e})", r.display())))?;
+        let n = number(&real)?;
+        numbered.push((real, Some(n)));
     }
     Ok(Evidence {
-        entry: crate::scratch::entry_number(entry),
+        entry: Some(number(entry)?),
         kind: if meta.is_dir() { "dir" } else { "zip" },
         size: if meta.is_dir() { 0 } else { meta.len() },
-        mtime_ms: stamp(&meta),
+        mtime_ms: stamp(&meta, entry)?,
         listing,
         roots: numbered,
     })
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+
+    #[test]
+    fn evidence_without_a_file_number_refuses() {
+        let d = std::env::temp_dir().join(format!("silo_evidence_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("FS25_Foo.zip");
+        std::fs::write(&f, b"PK").unwrap();
+        assert!(evidence_of(&f, &[&d]).is_ok());
+        let none = |_: &Path| None;
+        let e = evidence_with(&f, &[&d], &none).unwrap_err();
+        assert!(e.starts_with("Silo couldn't check which file"), "{e}");
+        // Only the folder's number missing refuses too.
+        let only_entry = |p: &Path| (p == f.as_path()).then_some((1, 1));
+        assert!(evidence_with(&f, &[&d], &only_entry).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

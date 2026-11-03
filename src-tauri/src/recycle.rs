@@ -32,15 +32,68 @@ pub fn move_to_bin(p: &Path) -> Binned {
     }
 }
 
-/// After a move that failed: still there, nothing happened; otherwise it's gone unconfirmed.
+/// After a move that failed: still there, nothing happened; confirmed gone, it's gone without a
+/// receipt; and when Silo can't look, it can't say.
 fn after_error(p: &Path, e: &str) -> Binned {
-    if p.symlink_metadata().is_ok() {
-        Binned::Kept(format!("couldn't move it to the Recycle Bin ({e})"))
-    } else {
-        Binned::Unsure(format!(
+    match p.symlink_metadata() {
+        Ok(_) => Binned::Kept(format!("couldn't move it to the Recycle Bin ({e})")),
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Binned::Unsure(format!(
             "it's gone from its folder, but moving it to the Recycle Bin reported a problem ({e})"
-        ))
+        )),
+        Err(other) => Binned::Unchecked(format!(
+            "moving it to the Recycle Bin reported a problem ({e}), and Silo couldn't check where it is now ({other})"
+        )),
     }
+}
+
+/// A Windows path as the Recycle Bin records it (no `\\?\` prefix), lower-cased for comparing.
+fn plain(p: &str) -> String {
+    let p = p
+        .strip_prefix(r"\\?\UNC\")
+        .map(|r| format!(r"\\{r}"))
+        .unwrap_or_else(|| p.strip_prefix(r"\\?\").unwrap_or(p).to_string());
+    p.to_lowercase()
+}
+
+/// The `$I` records in the readable Recycle Bin folders `dirs` (one per user; another user's
+/// can't be read and isn't listed).
+fn records(dirs: &[std::path::PathBuf]) -> std::collections::HashSet<std::path::PathBuf> {
+    dirs.iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .filter(|r| r.file_name().to_string_lossy().starts_with("$I"))
+        .map(|r| r.path())
+        .collect()
+}
+
+/// This move's receipt: a `$I` record in `dirs` that wasn't there `before`, names `original`
+/// (compared as [`plain`]), and whose `$R` payload is there, the same kind and, for a file, the
+/// same size. An older record for the same path (an earlier removal) never counts.
+fn new_receipt(
+    dirs: &[std::path::PathBuf],
+    before: &std::collections::HashSet<std::path::PathBuf>,
+    original: &str,
+    was_dir: bool,
+    size: u64,
+) -> bool {
+    records(dirs)
+        .into_iter()
+        .filter(|r| !before.contains(r))
+        .any(|r| {
+            let named = std::fs::read(&r).ok().and_then(|b| i_record_path(&b));
+            if !named.is_some_and(|n| plain(&n) == original) {
+                return false;
+            }
+            let name = r
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let payload = r.with_file_name(format!("$R{}", &name[2..]));
+            payload.symlink_metadata().is_ok_and(|m| {
+                !m.file_type().is_symlink() && m.is_dir() == was_dir && (was_dir || m.len() == size)
+            })
+        })
 }
 
 /// Whether `p` is on the same drive as the user's Trash (`$XDG_DATA_HOME/Trash`, or the nearest
@@ -92,19 +145,28 @@ mod windows {
         if let Err(why) = can_recycle(p) {
             return Binned::Kept(why);
         }
-        // The path as the Recycle Bin will record it, taken while it's still there.
-        let original = match std::fs::canonicalize(p) {
-            Ok(c) => plain(&c.to_string_lossy()),
-            Err(e) => return Binned::Kept(format!("Silo couldn't check it ({e})")),
+        // What the Recycle Bin will record, taken while it's still there: its path, kind and size,
+        // and the records already in the bin, so only a new one counts as this move's receipt.
+        let (original, meta) = match (std::fs::canonicalize(p), p.symlink_metadata()) {
+            (Ok(c), Ok(m)) => (plain(&c.to_string_lossy()), m),
+            (Err(e), _) | (_, Err(e)) => {
+                return Binned::Kept(format!("Silo couldn't check it ({e})"))
+            }
         };
-        let started = std::time::SystemTime::now();
+        let dirs = bin_dirs(p);
+        let before = records(&dirs);
         if let Err(e) = trash::delete(p) {
             return after_error(p, &e.to_string());
         }
-        if receipt(p, &original, started) {
+        match p.symlink_metadata() {
+            Ok(_) => return Binned::Kept("Windows didn't move it to the Recycle Bin".into()),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Binned::Unchecked(format!("Silo couldn't check where it is now ({e})"))
+            }
+            Err(_) => {}
+        }
+        if new_receipt(&dirs, &before, &original, meta.is_dir(), meta.len()) {
             Binned::Recycled
-        } else if p.symlink_metadata().is_ok() {
-            Binned::Kept("Windows didn't move it to the Recycle Bin".into())
         } else {
             Binned::Unsure(
                 "it's gone from its folder, but Silo found no Recycle Bin record for it, so Windows may have deleted it permanently".into(),
@@ -112,13 +174,23 @@ mod windows {
         }
     }
 
-    /// `\\?\C:\x` and `\\?\UNC\…` as Windows shows them elsewhere, lower-cased for comparing.
-    fn plain(p: &str) -> String {
-        let p = p
-            .strip_prefix(r"\\?\UNC\")
-            .map(|r| format!(r"\\{r}"))
-            .unwrap_or_else(|| p.strip_prefix(r"\\?\").unwrap_or(p).to_string());
-        p.to_lowercase()
+    /// The readable Recycle Bin folders on `p`'s drive (`<root>\$Recycle.Bin\<user>`).
+    fn bin_dirs(p: &Path) -> Vec<std::path::PathBuf> {
+        let Some(root) = volume_root(p) else {
+            return Vec::new();
+        };
+        let end = root.iter().position(|&c| c == 0).unwrap_or(root.len());
+        let bin = std::path::PathBuf::from(std::ffi::OsString::from_wide(&root[..end]))
+            .join("$Recycle.Bin");
+        std::fs::read_dir(&bin)
+            .map(|users| {
+                users
+                    .flatten()
+                    .map(|u| u.path())
+                    .filter(|u| std::fs::read_dir(u).is_ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Why the Recycle Bin can't take `p`, if it can't: not a fixed drive, recycling turned off
@@ -154,43 +226,6 @@ mod windows {
             }
         }
         Ok(())
-    }
-
-    /// Whether the Recycle Bin of `p`'s drive holds a record of `original`, made since `started`.
-    fn receipt(p: &Path, original: &str, started: std::time::SystemTime) -> bool {
-        let Some(root) = volume_root(p) else {
-            return false;
-        };
-        let end = root.iter().position(|&c| c == 0).unwrap_or(root.len());
-        let bin = std::path::PathBuf::from(std::ffi::OsString::from_wide(&root[..end]))
-            .join("$Recycle.Bin");
-        let since = started - std::time::Duration::from_secs(2);
-        let Ok(users) = std::fs::read_dir(&bin) else {
-            return false;
-        };
-        for user in users.flatten() {
-            let Ok(records) = std::fs::read_dir(user.path()) else {
-                continue; // another user's bin
-            };
-            for r in records.flatten() {
-                if !r.file_name().to_string_lossy().starts_with("$I") {
-                    continue;
-                }
-                let recent = r
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t >= since);
-                if recent
-                    && std::fs::read(r.path())
-                        .ok()
-                        .and_then(|b| i_record_path(&b))
-                        .is_some_and(|named| plain(&named) == original)
-                {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// A file's size, or a folder's total, not following links.
@@ -306,6 +341,80 @@ mod tests {
         assert_eq!(i_record_path(&v2[..30]), None, "cut short");
     }
 
+    /// A `$I` record (version 2) naming `path`.
+    fn record(path: &str) -> Vec<u8> {
+        let units: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        let mut b = header(2);
+        b.extend((units.len() as u32).to_le_bytes());
+        b.extend(units.iter().flat_map(|u| u.to_le_bytes()));
+        b
+    }
+
+    #[test]
+    fn only_a_new_record_with_its_payload_is_this_moves_receipt() {
+        let d = std::env::temp_dir().join(format!("silo_receipt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let user = d.join("S-1-5-21-test");
+        std::fs::create_dir_all(&user).unwrap();
+        let dirs = vec![user.clone()];
+        let original = plain(r"C:\mods\FS25_Foo.zip");
+        // An earlier removal of the same path: its record was there before this move.
+        std::fs::write(user.join("$IOLD111.zip"), record(r"C:\mods\FS25_Foo.zip")).unwrap();
+        std::fs::write(user.join("$ROLD111.zip"), b"PK old").unwrap();
+        let before = records(&dirs);
+        assert!(
+            !new_receipt(&dirs, &before, &original, false, 6),
+            "an older record never counts"
+        );
+        // A new record whose payload is missing, or the wrong size, doesn't count either.
+        std::fs::write(user.join("$INEW222.zip"), record(r"C:\mods\FS25_Foo.zip")).unwrap();
+        assert!(!new_receipt(&dirs, &before, &original, false, 6));
+        std::fs::write(user.join("$RNEW222.zip"), b"PK other size").unwrap();
+        assert!(!new_receipt(&dirs, &before, &original, false, 6));
+        // Another path's new record doesn't count.
+        std::fs::write(user.join("$IOTH333.zip"), record(r"C:\mods\FS25_Bar.zip")).unwrap();
+        std::fs::write(user.join("$ROTH333.zip"), b"PK new").unwrap();
+        assert!(!new_receipt(&dirs, &before, &original, false, 6));
+        // Its own new record with its payload: the receipt (the prefix and case don't matter).
+        std::fs::write(
+            user.join("$IMINE44.zip"),
+            record(r"\\?\C:\Mods\FS25_Foo.zip"),
+        )
+        .unwrap();
+        std::fs::write(user.join("$RMINE44.zip"), b"PK new").unwrap();
+        assert!(new_receipt(&dirs, &before, &original, false, 6));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_move_says_whether_the_item_is_there_gone_or_unknown() {
+        let d = std::env::temp_dir().join(format!("silo_after_error_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("FS25_Foo.zip");
+        std::fs::write(&f, b"PK").unwrap();
+        assert!(matches!(after_error(&f, "busy"), Binned::Kept(_)));
+        std::fs::remove_file(&f).unwrap();
+        assert!(matches!(after_error(&f, "busy"), Binned::Unsure(_)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = d.join("locked");
+            std::fs::create_dir_all(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let inside = locked.join("FS25_Foo.zip");
+            let unknown = matches!(
+                inside.symlink_metadata().map_err(|e| e.kind()),
+                Err(k) if k != std::io::ErrorKind::NotFound
+            );
+            if unknown {
+                assert!(matches!(after_error(&inside, "busy"), Binned::Unchecked(_)));
+            }
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Uses the real Recycle Bin: run by hand with `cargo test --lib recycle -- --ignored`.
     #[test]
     #[ignore]
@@ -317,7 +426,10 @@ mod tests {
         let f = d.join("FS25_SiloBinTest.zip");
         std::fs::write(&f, b"PK").unwrap();
         assert_eq!(move_to_bin(&f), Binned::Recycled);
-        assert_eq!(move_to_bin(&d.join("FS25_SiloBinTestFolder")), Binned::Recycled);
+        assert_eq!(
+            move_to_bin(&d.join("FS25_SiloBinTestFolder")),
+            Binned::Recycled
+        );
         assert!(!f.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
