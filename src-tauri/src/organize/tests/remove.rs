@@ -622,12 +622,12 @@ fn a_slot_silo_cant_inspect_refuses() {
     let (plan, found) = plan_removal(&conn, &layout, &[req("FS25_Foo", &src)], true);
     assert_eq!(plan.items.len(), 1, "{:?}", plan.refused);
     std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o600)).unwrap();
-    if mods
-        .join("FS25_Foo.zip")
-        .symlink_metadata()
-        .map_err(|e| e.kind())
-        == Err(std::io::ErrorKind::NotFound)
-    {
+    if matches!(
+        mods.join("FS25_Foo.zip")
+            .symlink_metadata()
+            .map_err(|e| e.kind()),
+        Err(std::io::ErrorKind::NotFound)
+    ) {
         // Running as root: permissions don't apply, nothing to test.
         std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&base);
