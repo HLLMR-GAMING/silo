@@ -6,6 +6,34 @@ gap between the RC protocol and visible proof it ran.
 
 ---
 
+## v1.0.5 — 2026-11-04 (database schema v6, Remove from library)
+
+Validated by hand (not an HLLMRD run). The release candidate was first tested on the owner's PC; that test found the silent permanent delete on a drive without a Recycle Bin (#442), fixed in #443 before tagging. Published 2026-11-04 12:45:16Z on the owner's instruction.
+
+### Artifact identity
+| Field | Value |
+|---|---|
+| Version | 1.0.5 |
+| Source | Tag `v1.0.5` (annotated, pushed by the owner as HLLMR) on `00d79bc`, the merge of #445; main's CI green on it |
+| Release run | [41826956347](https://github.com/HLLMR-VENTURES/silo/actions/runs/41826956347): guard passed, owner approved the `release` environment, all 4 builds + sbom + checksums green |
+| Release | draft id 433881698, prerelease=false, published as Latest; `/releases/latest` → v1.0.5 |
+| Assets | 19 (as 1.0.4) |
+| Installers | `SHA256SUMS.txt` SHA-256 `226fc139b5d5ff54b3542e0ef852080c95c892faeba0d07f1a165fa4a3fed981`; `Silo_1.0.5_x64-setup.exe` SHA-256 `4c207f425cbf2c81761fbaffe877721a81deec6f2db124809194d3e843a7ba6b`; `latest.json` SHA-256 `a4affd0e35dca9b5b64fde757696ff006f6d56b19945d09723a02f58e62266a4` |
+
+### Checks
+| Check | Result |
+|---|---|
+| macOS signing and notarization | both mac legs: "Set up macOS signing and notarization" and "Verify macOS signature and notarization" passed |
+| Windows Authenticode | `Get-AuthenticodeSignature` on the setup `.exe` and on the installed `silo.exe`: Valid, `CN=David Hellmer, O=David Hellmer, L=Grand Prairie, S=tx, C=US`, Microsoft timestamp |
+| Updater manifest | `latest.json` version 1.0.5; 11/11 platform entries. Every bundle's minisign signature verified against the `pubkey` in `tauri.conf.json` (key id match, file and trusted-comment signatures): NSIS, MSI, AppImage, deb, rpm, both `.app.tar.gz`. After publish, both `HLLMR-VENTURES/silo` and the old `HLLMR/silo` `releases/latest/download/latest.json` serve 1.0.5 |
+| Checksums | every downloadable bundle (setup `.exe`, `.msi`, both `.dmg`, AppImage, deb, rpm, both `.app.tar.gz`) matches `SHA256SUMS.txt` |
+| Provenance | `gh attestation verify --repo HLLMR-VENTURES/silo --format json` on the setup `.exe`: 2 attestations, source `refs/tags/v1.0.5` at `00d79bc1dd614281e633691b851e4af02a660eb6`, signer `release.yml@refs/tags/v1.0.5` |
+| Upgrade over 1.0.4 | silent per-user install (`/S`, exit 0) over 1.0.4 on the owner's PC; uninstall entry and `silo.exe` report 1.0.5; launched, logged "Silo 1.0.5 starting on windows" and "kept a copy before upgrading: …\db-snapshots\silo-before-v5.db", closed cleanly (exit 0); `mods/` size+mtime baseline (761 entries): 0 differences; `gameSettings.xml` and `game.xml` hashes unchanged; `silo://` handler registry export identical; DB `integrity_check` ok, **`user_version` 6**, new `foreign_mark` table, every other table's row count unchanged (739 cached mods, 736 organized); `silo-before-v5.db` written. DB copy kept outside the repo before upgrading |
+| RC test (before tagging) | on a copy of the owner's real DB: migration to v6, integrity ok. In an isolated build: Keep this one, Remove from library (active and several at once), Enter = Cancel, Undo organizing. On a drive without a Recycle Bin (`subst`): Windows asked "permanently delete?" over Silo; No kept the mod with a notice, Yes deleted it. The owner's real mods, settings, DB and handler unchanged throughout |
+| Not done | clean install; in-app update 1.0.4 → 1.0.5 not yet observed; macOS and Linux installs on real machines by us (#417 asks for testers) |
+
+---
+
 ## v1.0.3 — 2026-10-29 (database schema v3)
 
 Validated by hand (not an HLLMRD run). Published 2026-10-29 12:19:08Z on the owner's instruction.
