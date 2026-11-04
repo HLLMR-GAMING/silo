@@ -1412,8 +1412,12 @@ mod tests {
             fake: &fake,
             other: &other,
         };
+        // Room to reach the records on a slow runner (a 300 ms budget could run out while
+        // hashing, before any record was tried); the short wait for the database is what
+        // the busy record runs into.
         let short = Limits {
-            time: std::time::Duration::from_millis(300),
+            time: std::time::Duration::from_secs(10),
+            db_wait: std::time::Duration::from_millis(300),
             ..Limits::default()
         };
         let locks = Cell::new(0);
@@ -1430,7 +1434,8 @@ mod tests {
             lock,
             short,
         );
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        // One short wait, not the whole budget, nor a wait per record.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         assert!(
             out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
             "{out:?}"
