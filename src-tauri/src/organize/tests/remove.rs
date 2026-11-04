@@ -256,7 +256,7 @@ fn a_later_item_replaced_while_an_earlier_one_moves_is_refused() {
     assert_eq!(plan.items.len(), 2);
     let bin = base.join("bin");
     let moved = std::cell::Cell::new(0);
-    // Moving A takes a while; meanwhile B is replaced by another file of the same size.
+    // Moving A takes a while; meanwhile B is replaced by another file.
     let slow_bin = |p: &Path| {
         moved.set(moved.get() + 1);
         assert_eq!(p, a.as_path(), "B must never reach the bin");
@@ -768,17 +768,16 @@ fn a_kept_copy_gone_or_replaced_while_confirming_stops_everything() {
         let (_, found) =
             plan_removal_keeping(&conn, &layout, &[req("FS25_Foo", &src)], Some(&k), true);
         assert_eq!(found.len(), 1);
-        std::fs::remove_dir_all(&folder).unwrap();
         if replace {
-            // Another build in its place: its content differs. An identical one can't be told
-            // apart on Linux (a freed file number reused within the same millisecond), and it
-            // would still be the copy the user kept (#444).
+            // Another copy put in its place, with the same content: told apart by which files
+            // they are. The original is moved aside, not deleted, so its file numbers stay in
+            // use: deleted, the new copy could get the same ones within the same millisecond on
+            // Linux and match the snapshot exactly (#444).
+            std::fs::rename(&folder, base.join("kept-original")).unwrap();
             std::fs::create_dir_all(&folder).unwrap();
-            std::fs::write(
-                folder.join("modDesc.xml"),
-                r#"<modDesc><version>2.0.0.0</version></modDesc>"#,
-            )
-            .unwrap();
+            std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+        } else {
+            std::fs::remove_dir_all(&folder).unwrap();
         }
         let rep = carry_out(&conn, &layout, &found, Some(&k), true, &no_bin);
         assert!(rep.removed.is_empty());
