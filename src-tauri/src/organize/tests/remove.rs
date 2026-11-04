@@ -186,6 +186,18 @@ fn a_mod_the_bin_kept_stays_in_the_library_and_one_deleted_is_removed_and_said_s
         ]
     );
     assert_eq!(db::load_organized(&conn, &key_of(&layout)).len(), 1);
+    // A mod with no library row (here a loose zip) is still where it was, wherever that is.
+    let loose = layout.mods.join("FS25_Bar.zip");
+    std::fs::write(&loose, b"PK bar").unwrap();
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Bar", &loose)], true, &declined);
+    assert_eq!(
+        rep.notices,
+        vec![
+            "FS25_Bar.zip: Windows didn't remove it (you said No when it asked, or it stopped), so it's still where it was."
+                .to_string()
+        ]
+    );
+    assert!(loose.exists());
     // Deleted permanently (the user said Yes in Windows' prompt): removed, not recycled, and said.
     let deleted = |p: &Path| {
         std::fs::remove_file(p).unwrap();

@@ -436,10 +436,11 @@ pub fn carry_out(
                 false
             }
             Binned::Declined => {
+                // A loose mod or a second archived copy (#423) has no row: it's still where it was.
                 let still = if row.is_some() {
                     "in your library, parked"
                 } else {
-                    "in your mods folder"
+                    "where it was"
                 };
                 rep.notices.push(format!(
                     "{}: Windows didn't remove it (you said No when it asked, or it stopped), so it's still {still}.",
