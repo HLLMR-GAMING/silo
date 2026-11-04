@@ -816,14 +816,19 @@ mod tests {
     #[test]
     fn a_folder_with_something_too_deep_inside_is_refused() {
         let d = temp("deep_inside");
-        let folder = d.join("FS25_Deep");
+        // A parent with letters that take more bytes than characters: lengths are in characters
+        // (UTF-16 units), as Windows counts them.
+        let folder = d.join("张三丰 Mods").join("FS25_Deep");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("modDesc.xml"), b"<modDesc/>").unwrap();
         assert!(fits_shell(&folder).is_ok());
-        let budget = SHELL_MAX - folder.to_string_lossy().len();
+        let units = |p: &Path| shell_path(p).unwrap().encode_utf16().count();
+        let budget = SHELL_MAX - units(&folder);
+        // folder + `\` + a + `\` + b, two characters over the limit.
         let deep = folder
             .join("x".repeat(budget / 2))
-            .join("y".repeat(budget / 2 + 2));
+            .join("y".repeat(budget - budget / 2));
+        assert_eq!(units(&deep), SHELL_MAX + 2);
         std::fs::create_dir_all(&deep).unwrap();
         assert!(fits_shell(&folder).is_err(), "{}", deep.display());
         let _ = std::fs::remove_dir_all(&d);

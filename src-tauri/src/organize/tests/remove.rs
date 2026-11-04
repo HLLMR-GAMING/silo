@@ -1247,14 +1247,18 @@ fn keeping_the_loaded_library_copy_while_a_loaded_folder_goes_keeps_it_on() {
 #[test]
 fn a_mod_too_deep_for_the_recycle_bin_is_refused_before_anything_moves() {
     let base = temp_dir_for("rm_too_deep");
-    let mods = base.join("mods");
+    // Lengths in characters (UTF-16 units), as Windows counts them, under a parent whose letters
+    // take more bytes than characters.
+    let mods = base.join("张三丰 mods");
     let folder = mods.join("FS25_Deep");
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("modDesc.xml"), b"<modDesc/>").unwrap();
-    let budget = 259 - folder.to_string_lossy().len();
+    let units = |p: &Path| p.to_string_lossy().encode_utf16().count();
+    let budget = 259 - units(&folder);
     let deep = folder
         .join("x".repeat(budget / 2))
-        .join("y".repeat(budget / 2 + 2));
+        .join("y".repeat(budget - budget / 2));
+    assert_eq!(units(&deep), 261, "two characters over the limit");
     std::fs::create_dir_all(&deep).unwrap();
     let conn = db::open(&base.join("silo.db")).unwrap();
     let layout = Layout::default_for(&mods);
