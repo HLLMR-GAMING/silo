@@ -147,7 +147,7 @@ export function buildStubs(lib) {
     // Sharing: placeholder gists, shaped like the real thing. Silo always hands out its handoff
     // page, `https://silo.hllmr.com/c/?g=<gist id>` (collection::gist_page_url), never the gist,
     // and a gist id is 20 to 40 hex characters (github::valid_gist_id).
-    collections_list: { value: [{ kind: "gist", reference: SHARED_GIST, name: "Marlow Flats Grain", modCount: lib.sets[1].mods.length, createdAt: "2026-10-12T18:20:00Z", pageUrl: sharePage(SHARED_GIST), sourceUrl: `https://gist.github.com/${DEMO_USER}/${SHARED_GIST}`, canDelete: true }] },
+    collections_list: { value: { items: [{ kind: "gist", reference: SHARED_GIST, name: "Marlow Flats Grain", modCount: lib.sets[1].mods.length, createdAt: "2026-10-12T18:20:00Z", pageUrl: sharePage(SHARED_GIST), sourceUrl: `https://gist.github.com/${DEMO_USER}/${SHARED_GIST}`, canDelete: true }], warning: null } },
     collection_export: { value: { url: sharePage(NEW_GIST), count: lib.mods.filter((m) => m.active).length, omitted: [] } },
     collection_update: { error: OFF },
     collection_delete: { error: OFF },

@@ -212,11 +212,11 @@ export const SHOTS = {
   },
 
   "help-undo-organizing": {
-    alt: "Settings, Maintenance: the Undo organizing confirmation, which puts every mod back in the mods folder and deletes nothing.",
+    alt: "Settings, Maintenance: the Undo organizing confirmation, which puts your mods back in the mods folder and deletes nothing.",
     async run(d) {
       await settingsTab(d, "Maintenance");
       await d.click("Undo organizing", { sel: "main button" });
-      await d.waitText("Put every mod back in your mods folder?");
+      await d.waitText("Put your mods back in your mods folder?");
       await d.shot("help-undo-organizing");
       // A danger confirm is an alertdialog.
       await d.click("Cancel", { within: "[role=alertdialog]", sel: "button" });

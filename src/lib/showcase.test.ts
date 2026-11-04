@@ -2,6 +2,7 @@
 // real conflict and the crash it promises, its canned answers never point anywhere real, and the
 // safety checks refuse what they should.
 import { describe, expect, it } from "vitest";
+import type { CollectionList } from "./api";
 import { buildCatalog } from "../../scripts/showcase/lib/catalog.mjs";
 import { buildStubs } from "../../scripts/showcase/lib/stubs.mjs";
 import { personalTextPattern } from "../../scripts/showcase/lib/guard.mjs";
@@ -83,7 +84,11 @@ describe("showcase stubs", () => {
     // github::valid_gist_id), as the export returns.
     const page = /^https:\/\/silo\.hllmr\.com\/c\/\?g=[0-9a-f]{20,40}$/;
     expect((stubs.collection_export.value as { url: string }).url).toMatch(page);
-    for (const c of stubs.collections_list.value as { reference: string; pageUrl: string }[]) {
+    // The real command's shape (CollectionList): a bare array crashed My sets in the demo (#448).
+    const list = stubs.collections_list.value as CollectionList;
+    expect(Array.isArray(list.items) && list.items.length > 0).toBe(true);
+    expect(list.warning).toBeNull();
+    for (const c of list.items) {
       expect(c.pageUrl).toMatch(page);
       expect(c.reference).toMatch(/^[0-9a-f]{20,40}$/);
     }

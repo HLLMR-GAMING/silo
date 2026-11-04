@@ -204,7 +204,7 @@ start below it).
 - [ ] `[app]` **Accounts**: **GitHub account**: Connect / **Enable actions** / **Use a Personal Access Token** / Disconnect all render (see §14 for the real connect).
 - [ ] `[app]` **Diagnostics**: **Copy diagnostics** and **Export report**.
 - [ ] `[app]` Settings → Diagnostics → **Open log folder** opens the folder holding `silo.log` (Windows `%LOCALAPPDATA%\com.hllmr.silo\logs`) in the file manager.
-- [ ] `[app]` **Maintenance**: **Re-read every mod**, **Reclaim disk space** (organized, not cloud-synced) and **Undo organizing** (red). Undo organizing asks "Put every mod back in your mods folder?" with the **Undo organizing** button; Cancel changes nothing. While a change runs, each off button says why in text under it.
+- [ ] `[app]` **Maintenance**: **Re-read every mod**, **Reclaim disk space** (organized, not cloud-synced) and **Undo organizing** (red). Undo organizing asks "Put your mods back in your mods folder?" with the **Undo organizing** button; Cancel changes nothing. While a change runs, each off button says why in text under it.
 - [ ] `[app]` **About**: the version and the last scan time; with a Silo update ready, **Restart to update** (the same action as the update notice); the links open in the browser.
 
 **Browse tab — every surface:**
