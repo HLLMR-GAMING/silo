@@ -1,6 +1,6 @@
 [package]
 name = "silo"
-version = "1.0.4"
+version = "1.0.5"
 description = "Silo — Farming Simulator 25 mod library manager"
 authors = ["HLLMR Ventures LLC"]
 license = "MIT"

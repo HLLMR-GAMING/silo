@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-11-03
+
 The library database upgrades to version 6. Before upgrading, Silo tries to save a copy of the
 old database in `db-snapshots` (`silo-before-v5.db` when you update from 1.0.4). If a copy by
 that name is already there, Silo keeps it as it is; if the copy can't be made (a full disk, say),
@@ -1383,6 +1385,7 @@ First public beta.
   game-install discovery. Automatic mods-folder detection covers Windows and macOS;
   on Linux (Proton) the mods folder is set manually for now.
 
-[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.4...HEAD
+[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.5...HEAD
+[1.0.5]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.3...v1.0.4
 [0.1.0]: https://github.com/HLLMR-VENTURES/silo/releases/tag/v0.1.0
