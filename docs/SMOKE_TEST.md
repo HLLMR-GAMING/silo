@@ -464,6 +464,15 @@ Use a copy of a real mods folder. For a crash, end FS25 from Task Manager (or `t
 - [ ] `[app]` **Park them too.** Untick a set for a mod that's on (not the set you're on) → the toast offers **Park it too**, which parks it with the usual Park Undo.
 - [ ] `[app]` **Busy.** While a library change runs (Organize, Find the problem mod), **Save** is off with the reason as its tooltip.
 
+## 29. Remove from library and Keep this one (#429, #423, #442)  _(auto-verified: the removal plan and its re-checks, parking an active mod first, the Recycle Bin receipt, the Windows delete keeping its prompts, the shell path form)_
+
+Use a disposable mods folder (§1b) with copies of a few mods, never the real library.
+
+- [ ] `[app]` **One mod that's on.** Its details ⋯ → **Remove from library…** → the confirmation names its file and says it's parked first; **Enter** picks the safe button and nothing happens. Again, **Move to Recycle Bin** → the toast says it went to the Recycle Bin; the Recycle Bin lists the library copy and no copy is left in the mods folder.
+- [ ] `[app]` **Several at once.** Select one parked and one active mod → **Remove…** → the confirmation names both and says one is on → both go to the Recycle Bin.
+- [ ] `[app]` **Keep this one.** Put an unzipped folder of a mod beside its zip → Diagnose → Problems lists both copies → **Keep this one** on the zip → the folder goes to the Recycle Bin, the zip stays.
+- [ ] `[app]` **No Recycle Bin (#442, Windows).** Map a drive letter without a Recycle Bin to a test folder (`subst S: F:\<test>`; a USB stick also works), choose `S:\mods` as the mods folder (**Only in Silo**), and remove a mod → Windows itself asks whether to delete it permanently, on top of Silo. **No** → it's still there and Silo says you said No; **Yes** → it's gone and Silo says Windows deleted it permanently. `subst S: /D` afterwards.
+
 ## Sign-off
 - [ ] All `[app]` items pass.
 - [ ] All `[game]`/`[net]` items pass (or known-limitations noted below).

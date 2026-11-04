@@ -3358,6 +3358,22 @@ async fn plan_removal(
     .map_err(error::AppError::from)
 }
 
+/// Silo's main window, for Windows' own prompts (such as "permanently delete?") to sit on top of
+/// it instead of behind it (#442). `None` off Windows or when there's no window to use.
+fn prompt_owner(app: &tauri::AppHandle) -> recycle::Owner {
+    #[cfg(windows)]
+    {
+        app.get_webview_window("main")
+            .and_then(|w| w.hwnd().ok())
+            .map(|h| h.0 as isize)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        None
+    }
+}
+
 /// Carry out the confirmed removal plan `plan_id` (#429): each mod is checked again against what
 /// was confirmed, an active library mod is parked first, and each file or folder goes to the
 /// Recycle Bin / Trash (`recycle::move_to_bin`). Refused while FS25 runs or starts, a move is
@@ -3369,6 +3385,7 @@ async fn remove_from_library(
 ) -> Result<organize::RemoveReport, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
+    let owner = prompt_owner(&app);
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::RemoveReport, String> {
         let _write = library_write()?;
         // Admitted once the write is ours (waiting for it can take a while, and the game may
@@ -3392,7 +3409,7 @@ async fn remove_from_library(
             &planned,
             keeper.as_ref(),
             archive_ok,
-            &recycle::move_to_bin,
+            &|p| recycle::move_to_bin(p, owner),
         );
         log::info!(
             "removed {} mod(s) from the library to the Recycle Bin ({} not removed)",

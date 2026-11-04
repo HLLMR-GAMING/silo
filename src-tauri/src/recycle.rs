@@ -1,11 +1,11 @@
 //! Move a file or folder to the Recycle Bin / Trash (#429) the way deleting it in the system's own
 //! file manager does, and say what became of that very item.
 //!
-//! - Windows: the shell's delete with undo (the `trash` crate). Where it can't recycle (a USB or
-//!   network drive, the bin turned off or too small), Windows itself asks whether to delete the
-//!   item permanently, and the user's answer stands. Afterwards the item's own new Recycle Bin
-//!   record (`$Recycle.Bin\<user>\$I…`, naming its original path, beside its `$R…` payload) tells
-//!   recycled from deleted.
+//! - Windows: the shell's delete with undo, asking where File Explorer asks (#442). Where it can't
+//!   recycle (a USB or network drive, the bin turned off or too small), Windows itself asks
+//!   whether to delete the item permanently, and the user's answer stands. Afterwards the item's
+//!   own new Recycle Bin record (`$Recycle.Bin\<user>\$I…`, naming its original path, beside its
+//!   `$R…` payload) tells recycled from deleted.
 //! - Linux: a folder on another drive than the Trash is refused (moving it there means copying and
 //!   deleting it, which can stop halfway).
 //! - macOS: the system moves it to the Trash of its volume.
@@ -14,14 +14,19 @@ use crate::organize::Binned;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// The window Windows' own prompts sit on top of: its handle (HWND) as a number. `None` leaves
+/// them on the desktop. Only Windows uses it.
+pub type Owner = Option<isize>;
+
 /// Move `p` to the bin and say what became of it.
-pub fn move_to_bin(p: &Path) -> Binned {
+pub fn move_to_bin(p: &Path, owner: Owner) -> Binned {
     #[cfg(windows)]
     {
-        windows::move_to_bin(p)
+        windows::move_to_bin(p, owner)
     }
     #[cfg(not(windows))]
     {
+        let _ = owner;
         #[cfg(target_os = "linux")]
         if p.is_dir() && !same_drive_as_trash(p) {
             return Binned::Kept(
@@ -97,6 +102,22 @@ fn plain(p: &str) -> String {
         .map(|r| format!(r"\\{r}"))
         .unwrap_or_else(|| p.strip_prefix(r"\\?\").unwrap_or(p).to_string());
     p.to_lowercase()
+}
+
+/// `p` as the shell's delete takes it: a full path without the `\\?\` prefix (which it doesn't
+/// read), letters kept as they are. `None` for a path that isn't full, which the shell would read
+/// against Silo's current folder.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn shell_path(p: &Path) -> Option<String> {
+    let s = p.to_str()?;
+    let s = s
+        .strip_prefix(r"\\?\UNC\")
+        .map(|r| format!(r"\\{r}"))
+        .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(s).to_string())
+        .replace('/', r"\");
+    let b = s.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+    (drive || s.starts_with(r"\\")).then_some(s)
 }
 
 /// What this user's Recycle Bin folder (`$Recycle.Bin\<user SID>` on the item's drive) held
@@ -247,7 +268,10 @@ mod windows {
     use super::*;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-    pub(super) fn move_to_bin(p: &Path) -> Binned {
+    pub(super) fn move_to_bin(p: &Path, owner: Owner) -> Binned {
+        let Some(shell) = shell_path(p) else {
+            return Binned::Kept("Silo couldn't check it (not a full path)".into());
+        };
         // What the Recycle Bin will record, taken while it's still there: its path, kind and size,
         // and what the bin held, so only a new record counts as this move's receipt.
         let (original, meta) = match (std::fs::canonicalize(p), p.symlink_metadata()) {
@@ -262,8 +286,13 @@ mod windows {
         let was = user_bin.as_deref().map(|d| before(&DISK, d));
         // Where it can't recycle, Windows asks before deleting permanently: the user's answer
         // stands ("No" leaves it, and this reports it kept).
-        if let Err(e) = trash::delete(p) {
-            return after_error(p, &e.to_string());
+        match shell_delete(&shell, owner) {
+            Shell::Done => {}
+            Shell::Declined if p.symlink_metadata().is_ok() => {
+                return Binned::Kept("you said No when Windows asked, so it's still there".into())
+            }
+            Shell::Declined => {}
+            Shell::Failed(e) => return after_error(p, &e),
         }
         match p.symlink_metadata() {
             Ok(_) => return Binned::Kept("Windows didn't move or delete it".into()),
@@ -277,6 +306,70 @@ mod windows {
                 .zip(was)
                 .map(|(dir, was)| receipt(&DISK, &dir, &was, &original, meta.is_dir(), meta.len())),
         )
+    }
+
+    /// What the shell's delete did.
+    enum Shell {
+        /// It finished: the disk says what became of the item.
+        Done,
+        /// The user answered No (or closed) a prompt Windows showed.
+        Declined,
+        /// It failed outright, with the shell's code.
+        Failed(String),
+    }
+
+    /// File Explorer's delete (#442): to the Recycle Bin with undo, and Windows' own prompts where
+    /// Explorer shows them: "permanently delete?" where it can't recycle, and "move to the Recycle
+    /// Bin?" only if the user turned that on. No error pop-ups (Silo says what went wrong) and no
+    /// "create folder?" question. Never `FOF_NOCONFIRMATION`: with it Windows deletes permanently
+    /// without asking, even with `FOF_WANTNUKEWARNING`.
+    pub(super) const DELETE_FLAGS: u32 = windows_sys::Win32::UI::Shell::FOF_ALLOWUNDO
+        | windows_sys::Win32::UI::Shell::FOF_NOERRORUI
+        | windows_sys::Win32::UI::Shell::FOF_NOCONFIRMMKDIR;
+
+    /// Delete `path` (as [`shell_path`] gives it) the way File Explorer does, with its prompts on
+    /// top of `owner`.
+    fn shell_delete(path: &str, owner: Owner) -> Shell {
+        use windows_sys::Win32::System::Com::{
+            CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+        };
+        use windows_sys::Win32::UI::Shell::{SHFileOperationW, FO_DELETE, SHFILEOPSTRUCTW};
+        // The list of paths ends with an empty one: two NULs.
+        let from: Vec<u16> = path.encode_utf16().chain([0, 0]).collect();
+        let mut op = SHFILEOPSTRUCTW {
+            hwnd: owner.unwrap_or(0) as _,
+            wFunc: FO_DELETE,
+            pFrom: from.as_ptr(),
+            pTo: std::ptr::null(),
+            fFlags: DELETE_FLAGS as u16,
+            fAnyOperationsAborted: 0,
+            hNameMappings: std::ptr::null_mut(),
+            lpszProgressTitle: std::ptr::null(),
+        };
+        // The shell's dialogs want a single-threaded apartment. A thread already set up another
+        // way (RPC_E_CHANGED_MODE) is used as it is and left so.
+        // SAFETY: no reserved pointer; balanced by CoUninitialize below when it succeeded.
+        let com = unsafe {
+            CoInitializeEx(
+                std::ptr::null(),
+                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+            )
+        };
+        // SAFETY: `op` and the `from` list it points to live across the call; `from` ends with
+        // two NULs, `pTo` isn't used by a delete.
+        let code = unsafe { SHFileOperationW(&mut op) };
+        if com >= 0 {
+            // SAFETY: CoInitializeEx succeeded on this thread above (S_OK or S_FALSE).
+            unsafe { CoUninitialize() };
+        }
+        // ERROR_CANCELLED, or the shell's own DE_OPCANCELLED.
+        if op.fAnyOperationsAborted != 0 || code == 1223 || code == 0x75 {
+            Shell::Declined
+        } else if code != 0 {
+            Shell::Failed(format!("Windows reported error {code:#x}"))
+        } else {
+            Shell::Done
+        }
     }
 
     /// The current user's SID as text (`S-1-5-21-…`): the name of their folder in each drive's
@@ -566,6 +659,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn the_shell_gets_a_full_plain_path_or_nothing() {
+        assert_eq!(
+            shell_path(Path::new(r"\\?\F:\Mods\FS25_Foo.zip")).as_deref(),
+            Some(r"F:\Mods\FS25_Foo.zip"),
+            "prefix dropped, letters kept"
+        );
+        assert_eq!(
+            shell_path(Path::new(r"\\?\UNC\nas\games\FS25_Foo.zip")).as_deref(),
+            Some(r"\\nas\games\FS25_Foo.zip")
+        );
+        assert_eq!(
+            shell_path(Path::new(r"\\nas\games\FS25_Foo.zip")).as_deref(),
+            Some(r"\\nas\games\FS25_Foo.zip")
+        );
+        assert_eq!(
+            shell_path(Path::new("F:/Mods/archive/FS25_Foo.zip")).as_deref(),
+            Some(r"F:\Mods\archive\FS25_Foo.zip")
+        );
+        for relative in [
+            "FS25_Foo.zip",
+            r"mods\FS25_Foo.zip",
+            r"\mods\FS25_Foo.zip",
+            "F:FS25_Foo.zip",
+        ] {
+            assert_eq!(shell_path(Path::new(relative)), None, "{relative}");
+        }
+    }
+
+    /// #442: with "no confirmation" Windows deletes permanently without asking where it can't
+    /// recycle, so the delete leaves Windows' prompts on, as File Explorer does.
+    #[cfg(windows)]
+    #[test]
+    fn the_delete_keeps_windows_prompts() {
+        use windows_sys::Win32::UI::Shell::{
+            FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
+        };
+        let f = windows::DELETE_FLAGS;
+        assert_ne!(f & FOF_ALLOWUNDO, 0, "to the Recycle Bin");
+        assert_eq!(
+            f & FOF_NOCONFIRMATION,
+            0,
+            "Windows asks before deleting permanently"
+        );
+        assert_ne!(f & FOF_NOERRORUI, 0, "Silo reports errors itself");
+        assert_eq!(f & (FOF_SILENT | FOF_WANTNUKEWARNING), 0);
+        assert!(f <= u16::MAX as u32, "fits the shell's 16-bit flags");
+    }
+
     /// Uses the real Recycle Bin: run by hand with `cargo test --lib recycle -- --ignored`.
     #[test]
     #[ignore]
@@ -575,9 +717,9 @@ mod tests {
         std::fs::write(d.join("FS25_SiloBinTestFolder/modDesc.xml"), b"<modDesc/>").unwrap();
         let f = d.join("FS25_SiloBinTest.zip");
         std::fs::write(&f, b"PK").unwrap();
-        assert_eq!(move_to_bin(&f), Binned::Recycled);
+        assert_eq!(move_to_bin(&f, None), Binned::Recycled);
         assert_eq!(
-            move_to_bin(&d.join("FS25_SiloBinTestFolder")),
+            move_to_bin(&d.join("FS25_SiloBinTestFolder"), None),
             Binned::Recycled
         );
         assert!(!f.exists());
