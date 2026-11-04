@@ -67,6 +67,9 @@ pub enum Binned {
     Recycled,
     /// Still where it was; why.
     Kept(String),
+    /// Still where it was: the user said No when Windows asked (#442). Their choice, not a
+    /// problem.
+    Declined,
     /// Gone from its folder without a Recycle Bin record: deleted permanently (where it can't
     /// recycle, Windows asks first), or the bin couldn't be read; what's known.
     Gone(String),
@@ -430,6 +433,18 @@ pub fn carry_out(
                     ""
                 };
                 rep.errors.push(format!("{name}: {why}.{still}"));
+                false
+            }
+            Binned::Declined => {
+                let still = if row.is_some() {
+                    "in your library, parked"
+                } else {
+                    "in your mods folder"
+                };
+                rep.notices.push(format!(
+                    "{}: you said No when Windows asked, so it's still {still}.",
+                    p.file_name
+                ));
                 false
             }
             // Gone, as the user chose in Windows' own prompt, or not confirmed in the bin: removed,

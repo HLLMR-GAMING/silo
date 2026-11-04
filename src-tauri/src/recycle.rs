@@ -288,9 +288,7 @@ mod windows {
         // stands ("No" leaves it, and this reports it kept).
         match shell_delete(&shell, owner) {
             Shell::Done => {}
-            Shell::Declined if p.symlink_metadata().is_ok() => {
-                return Binned::Kept("you said No when Windows asked, so it's still there".into())
-            }
+            Shell::Declined if p.symlink_metadata().is_ok() => return Binned::Declined,
             Shell::Declined => {}
             Shell::Failed(e) => return after_error(p, &e),
         }

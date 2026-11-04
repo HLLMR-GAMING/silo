@@ -159,13 +159,29 @@ fn a_library_mod_is_refused_while_the_archive_is_unreachable() {
 #[test]
 fn a_mod_the_bin_kept_stays_in_the_library_and_one_deleted_is_removed_and_said_so() {
     let (base, conn, layout, src) = library_with_foo("rm_bin_outcomes", false);
-    let kept = |_: &Path| Binned::Kept("you chose No in Windows' prompt".into());
+    let kept = |_: &Path| Binned::Kept("couldn't move it to the Recycle Bin (busy)".into());
     let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &kept);
     assert!(rep.removed.is_empty());
     assert_eq!(
         rep.errors,
         vec![
-            "FS25_Foo: you chose No in Windows' prompt. It's still in your library, parked."
+            "FS25_Foo: couldn't move it to the Recycle Bin (busy). It's still in your library, parked."
+                .to_string()
+        ]
+    );
+    assert_eq!(db::load_organized(&conn, &key_of(&layout)).len(), 1);
+    // No in Windows' own prompt (#442): the user's choice, said as a notice, not a problem.
+    let declined = |_: &Path| Binned::Declined;
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &declined);
+    assert!(
+        rep.removed.is_empty() && rep.errors.is_empty(),
+        "{:?}",
+        rep.errors
+    );
+    assert_eq!(
+        rep.notices,
+        vec![
+            "FS25_Foo.zip: you said No when Windows asked, so it's still in your library, parked."
                 .to_string()
         ]
     );
