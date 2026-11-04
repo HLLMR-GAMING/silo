@@ -770,8 +770,15 @@ fn a_kept_copy_gone_or_replaced_while_confirming_stops_everything() {
         assert_eq!(found.len(), 1);
         std::fs::remove_dir_all(&folder).unwrap();
         if replace {
+            // Another build in its place: its content differs. An identical one can't be told
+            // apart on Linux (a freed file number reused within the same millisecond), and it
+            // would still be the copy the user kept (#444).
             std::fs::create_dir_all(&folder).unwrap();
-            std::fs::write(folder.join("modDesc.xml"), "<modDesc/>").unwrap();
+            std::fs::write(
+                folder.join("modDesc.xml"),
+                r#"<modDesc><version>2.0.0.0</version></modDesc>"#,
+            )
+            .unwrap();
         }
         let rep = carry_out(&conn, &layout, &found, Some(&k), true, &no_bin);
         assert!(rep.removed.is_empty());
