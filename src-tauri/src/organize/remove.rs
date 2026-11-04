@@ -67,8 +67,8 @@ pub enum Binned {
     Recycled,
     /// Still where it was; why.
     Kept(String),
-    /// Still where it was: the user said No when Windows asked (#442). Their choice, not a
-    /// problem.
+    /// Still where it was, untouched: Windows' delete stopped, after the user said No to its
+    /// prompt or by itself (#442). Said as a notice, not a problem.
     Declined,
     /// Gone from its folder without a Recycle Bin record: deleted permanently (where it can't
     /// recycle, Windows asks first), or the bin couldn't be read; what's known.
@@ -442,7 +442,7 @@ pub fn carry_out(
                     "in your mods folder"
                 };
                 rep.notices.push(format!(
-                    "{}: you said No when Windows asked, so it's still {still}.",
+                    "{}: Windows didn't remove it (you said No when it asked, or it stopped), so it's still {still}.",
                     p.file_name
                 ));
                 false
@@ -498,14 +498,17 @@ fn check(
     archive_ok: bool,
 ) -> Result<(Planned, Evidence), String> {
     let given = Path::new(&r.path);
-    match library_row(layout, rows, r) {
+    let found = match library_row(layout, rows, r) {
         Some(row) => check_library(layout, rows, row, r, archive_ok),
         // In a category folder of the archive, with no row of its own: a second copy (#423).
         None if given.parent().and_then(Path::parent) == Some(layout.archive.as_path()) => {
             check_archived_copy(layout, rows, r, archive_ok)
         }
         None => check_loose(layout, rows, r),
-    }
+    }?;
+    // One the Recycle Bin can't take is refused here, before anything is parked (#442).
+    crate::recycle::fits_the_bin(given)?;
+    Ok(found)
 }
 
 /// Whether the entry `name` (`meta` its own metadata) is mod `tech` itself: a zip named after it,

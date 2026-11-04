@@ -181,7 +181,7 @@ fn a_mod_the_bin_kept_stays_in_the_library_and_one_deleted_is_removed_and_said_s
     assert_eq!(
         rep.notices,
         vec![
-            "FS25_Foo.zip: you said No when Windows asked, so it's still in your library, parked."
+            "FS25_Foo.zip: Windows didn't remove it (you said No when it asked, or it stopped), so it's still in your library, parked."
                 .to_string()
         ]
     );
@@ -1238,5 +1238,34 @@ fn keeping_the_loaded_library_copy_while_a_loaded_folder_goes_keeps_it_on() {
         db::load_organized(&conn, &key_of(&layout))[0].active,
         "still on"
     );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// #442: Windows' Recycle Bin reads paths of up to 259 characters. A mod with something deeper
+/// is refused when the removal is planned, before anything is parked, and nothing moves.
+#[cfg(windows)]
+#[test]
+fn a_mod_too_deep_for_the_recycle_bin_is_refused_before_anything_moves() {
+    let base = temp_dir_for("rm_too_deep");
+    let mods = base.join("mods");
+    let folder = mods.join("FS25_Deep");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("modDesc.xml"), b"<modDesc/>").unwrap();
+    let budget = 259 - folder.to_string_lossy().len();
+    let deep = folder
+        .join("x".repeat(budget / 2))
+        .join("y".repeat(budget / 2 + 2));
+    std::fs::create_dir_all(&deep).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let (plan, rep) = remove(&conn, &layout, &[req("FS25_Deep", &folder)], true, &no_bin);
+    assert!(plan.items.is_empty());
+    assert!(
+        plan.refused[0].contains("259 characters"),
+        "{:?}",
+        plan.refused
+    );
+    assert!(rep.removed.is_empty() && rep.errors.is_empty());
+    assert!(deep.exists());
     let _ = std::fs::remove_dir_all(&base);
 }
