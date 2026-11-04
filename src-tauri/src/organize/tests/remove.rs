@@ -159,17 +159,45 @@ fn a_library_mod_is_refused_while_the_archive_is_unreachable() {
 #[test]
 fn a_mod_the_bin_kept_stays_in_the_library_and_one_deleted_is_removed_and_said_so() {
     let (base, conn, layout, src) = library_with_foo("rm_bin_outcomes", false);
-    let kept = |_: &Path| Binned::Kept("you chose No in Windows' prompt".into());
+    let kept = |_: &Path| Binned::Kept("couldn't move it to the Recycle Bin (busy)".into());
     let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &kept);
     assert!(rep.removed.is_empty());
     assert_eq!(
         rep.errors,
         vec![
-            "FS25_Foo: you chose No in Windows' prompt. It's still in your library, parked."
+            "FS25_Foo: couldn't move it to the Recycle Bin (busy). It's still in your library, parked."
                 .to_string()
         ]
     );
     assert_eq!(db::load_organized(&conn, &key_of(&layout)).len(), 1);
+    // No in Windows' own prompt (#442): the user's choice, said as a notice, not a problem.
+    let declined = |_: &Path| Binned::Declined;
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Foo", &src)], true, &declined);
+    assert!(
+        rep.removed.is_empty() && rep.errors.is_empty(),
+        "{:?}",
+        rep.errors
+    );
+    assert_eq!(
+        rep.notices,
+        vec![
+            "FS25_Foo.zip: Windows didn't remove it (you said No when it asked, or it stopped), so it's still in your library, parked."
+                .to_string()
+        ]
+    );
+    assert_eq!(db::load_organized(&conn, &key_of(&layout)).len(), 1);
+    // A mod with no library row (here a loose zip) is still where it was, wherever that is.
+    let loose = layout.mods.join("FS25_Bar.zip");
+    std::fs::write(&loose, b"PK bar").unwrap();
+    let (_, rep) = remove(&conn, &layout, &[req("FS25_Bar", &loose)], true, &declined);
+    assert_eq!(
+        rep.notices,
+        vec![
+            "FS25_Bar.zip: Windows didn't remove it (you said No when it asked, or it stopped), so it's still where it was."
+                .to_string()
+        ]
+    );
+    assert!(loose.exists());
     // Deleted permanently (the user said Yes in Windows' prompt): removed, not recycled, and said.
     let deleted = |p: &Path| {
         std::fs::remove_file(p).unwrap();
@@ -1222,5 +1250,38 @@ fn keeping_the_loaded_library_copy_while_a_loaded_folder_goes_keeps_it_on() {
         db::load_organized(&conn, &key_of(&layout))[0].active,
         "still on"
     );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// #442: Windows' Recycle Bin reads paths of up to 259 characters. A mod with something deeper
+/// is refused when the removal is planned, before anything is parked, and nothing moves.
+#[cfg(windows)]
+#[test]
+fn a_mod_too_deep_for_the_recycle_bin_is_refused_before_anything_moves() {
+    let base = temp_dir_for("rm_too_deep");
+    // Lengths in characters (UTF-16 units), as Windows counts them, under a parent whose letters
+    // take more bytes than characters.
+    let mods = base.join("张三丰 mods");
+    let folder = mods.join("FS25_Deep");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("modDesc.xml"), b"<modDesc/>").unwrap();
+    let units = |p: &Path| p.to_string_lossy().encode_utf16().count();
+    let budget = 259 - units(&folder);
+    let deep = folder
+        .join("x".repeat(budget / 2))
+        .join("y".repeat(budget - budget / 2));
+    assert_eq!(units(&deep), 261, "two characters over the limit");
+    std::fs::create_dir_all(&deep).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let layout = Layout::default_for(&mods);
+    let (plan, rep) = remove(&conn, &layout, &[req("FS25_Deep", &folder)], true, &no_bin);
+    assert!(plan.items.is_empty());
+    assert!(
+        plan.refused[0].contains("259 characters"),
+        "{:?}",
+        plan.refused
+    );
+    assert!(rep.removed.is_empty() && rep.errors.is_empty());
+    assert!(deep.exists());
     let _ = std::fs::remove_dir_all(&base);
 }
