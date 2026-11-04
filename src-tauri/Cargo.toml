@@ -69,10 +69,6 @@ keyring = { version = "3", features = [
     "crypto-rust",
 ] }
 
-# Remove from library (#429): the mod's file goes to the Recycle Bin / Trash, so a mistake can be
-# undone outside Silo, never deleted outright.
-trash = "5.2.9"
-
 # Process listing, to refuse moving mods while FS25 is running (see gamelaunch::fs25_running).
 sysinfo = { version = "0.36", default-features = false, features = ["system", "disk"] }
 
@@ -90,12 +86,16 @@ junction = "1.4.1"
 # drive is found (gamelaunch::steam_roots). Microsoft's crate, already in the tree via hyper-util.
 windows-registry = "0.6"
 # MoveFileExW without MOVEFILE_REPLACE_EXISTING: a rename that never replaces a file
-# (paths::rename_no_replace). Already in the tree (mio, tauri) with this feature enabled.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+# (paths::rename_no_replace). Already in the tree (mio, tauri) with this feature enabled. Also
+# the shell's delete with File Explorer's prompts (recycle::windows, #442).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 # renameat2(RENAME_NOREPLACE) on Linux, renamex_np(RENAME_EXCL) on macOS: a rename that never
 # replaces a file (paths::rename_no_replace). Already in the tree via many crates.
 [target.'cfg(unix)'.dependencies]
+# Remove from library (#429): the mod's file goes to the Trash, so a mistake can be undone outside
+# Silo. Windows uses the shell's delete directly, for File Explorer's prompts (recycle, #442).
+trash = "5.2.9"
 libc = "0.2"
 
 # Tell "there's no Secret Service" from "the Secret Service refused" (secrets::service_absent):

@@ -1,11 +1,11 @@
 //! Move a file or folder to the Recycle Bin / Trash (#429) the way deleting it in the system's own
 //! file manager does, and say what became of that very item.
 //!
-//! - Windows: the shell's delete with undo (the `trash` crate). Where it can't recycle (a USB or
-//!   network drive, the bin turned off or too small), Windows itself asks whether to delete the
-//!   item permanently, and the user's answer stands. Afterwards the item's own new Recycle Bin
-//!   record (`$Recycle.Bin\<user>\$I…`, naming its original path, beside its `$R…` payload) tells
-//!   recycled from deleted.
+//! - Windows: the shell's delete with undo, asking where File Explorer asks (#442). Where it can't
+//!   recycle (a USB or network drive, the bin turned off or too small), Windows itself asks
+//!   whether to delete the item permanently, and the user's answer stands. Afterwards the item's
+//!   own new Recycle Bin record (`$Recycle.Bin\<user>\$I…`, naming its original path, beside its
+//!   `$R…` payload) tells recycled from deleted.
 //! - Linux: a folder on another drive than the Trash is refused (moving it there means copying and
 //!   deleting it, which can stop halfway).
 //! - macOS: the system moves it to the Trash of its volume.
@@ -14,14 +14,19 @@ use crate::organize::Binned;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// The window Windows' own prompts sit on top of: its handle (HWND) as a number. `None` leaves
+/// them on the desktop. Only Windows uses it.
+pub type Owner = Option<isize>;
+
 /// Move `p` to the bin and say what became of it.
-pub fn move_to_bin(p: &Path) -> Binned {
+pub fn move_to_bin(p: &Path, owner: Owner) -> Binned {
     #[cfg(windows)]
     {
-        windows::move_to_bin(p)
+        windows::move_to_bin(p, owner)
     }
     #[cfg(not(windows))]
     {
+        let _ = owner;
         #[cfg(target_os = "linux")]
         if p.is_dir() && !same_drive_as_trash(p) {
             return Binned::Kept(
@@ -33,6 +38,78 @@ pub fn move_to_bin(p: &Path) -> Binned {
             Err(e) => after_error(p, &e.to_string()),
         }
     }
+}
+
+/// The longest path Windows' shell delete reads: MAX_PATH less its closing NUL.
+#[cfg_attr(not(windows), allow(dead_code))]
+const SHELL_MAX: usize = 259;
+
+/// Whether the Recycle Bin can take `p` (#442), asked before anything is parked. On Windows the
+/// shell's delete reads full paths of up to 259 characters: `p` and, for a folder, everything
+/// inside it. Elsewhere always Ok. Err says why not.
+pub fn fits_the_bin(p: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        fits_shell(p)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        Ok(())
+    }
+}
+
+/// [`fits_the_bin`] for Windows' shell delete. A folder that can't be read whole isn't refused
+/// here: the delete itself then says what went wrong.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn fits_shell(p: &Path) -> Result<(), String> {
+    let Some(top) = shell_path(p) else {
+        return Err("Silo can't hand its path to the Recycle Bin, so it won't remove it.".into());
+    };
+    let units = |s: &str| s.encode_utf16().count();
+    let mut longest = units(&top);
+    let _ = walk(p, &mut |q, _| {
+        longest = longest.max(shell_path(q).map_or(usize::MAX, |s| units(&s)));
+    });
+    if longest > SHELL_MAX {
+        return Err(format!(
+            "its path, or the path of something inside it, is longer than the {SHELL_MAX} characters Windows' Recycle Bin takes, so Silo won't remove it."
+        ));
+    }
+    Ok(())
+}
+
+/// Everything inside folder `p`, never following a link: `f` gets each path and its own
+/// metadata. Nothing for a file. Err when something couldn't be read.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn walk(p: &Path, f: &mut dyn FnMut(&Path, &std::fs::Metadata)) -> std::io::Result<()> {
+    if !p.symlink_metadata()?.is_dir() {
+        return Ok(());
+    }
+    for e in std::fs::read_dir(p)? {
+        let q = e?.path();
+        let m = q.symlink_metadata()?;
+        f(&q, &m);
+        if m.is_dir() {
+            walk(&q, f)?;
+        }
+    }
+    Ok(())
+}
+
+/// What folder `p` holds, to tell one left as it was from one partly deleted: how many entries
+/// and how many bytes of files. `None` when it couldn't be read whole.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tree_stamp(p: &Path) -> Option<(u64, u64)> {
+    let (mut entries, mut bytes) = (0u64, 0u64);
+    walk(p, &mut |_, m| {
+        entries += 1;
+        if m.is_file() {
+            bytes += m.len();
+        }
+    })
+    .ok()?;
+    Some((entries, bytes))
 }
 
 /// After a move that failed: still there, nothing happened; confirmed gone, it's gone without a
@@ -97,6 +174,26 @@ fn plain(p: &str) -> String {
         .map(|r| format!(r"\\{r}"))
         .unwrap_or_else(|| p.strip_prefix(r"\\?\").unwrap_or(p).to_string());
     p.to_lowercase()
+}
+
+/// `p` as the shell's delete takes it: a full path without the `\\?\` prefix (which it doesn't
+/// read), letters kept as they are. `None` for a path that isn't full, which the shell would read
+/// against Silo's current folder.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn shell_path(p: &Path) -> Option<String> {
+    let s = p.to_str()?;
+    let s = s
+        .strip_prefix(r"\\?\UNC\")
+        .map(|r| format!(r"\\{r}"))
+        .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(s).to_string())
+        .replace('/', r"\");
+    // The shell reads `*` and `?` as wildcards; no Windows name has them.
+    if s.contains(['*', '?']) {
+        return None;
+    }
+    let b = s.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+    (drive || s.starts_with(r"\\")).then_some(s)
 }
 
 /// What this user's Recycle Bin folder (`$Recycle.Bin\<user SID>` on the item's drive) held
@@ -247,7 +344,13 @@ mod windows {
     use super::*;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-    pub(super) fn move_to_bin(p: &Path) -> Binned {
+    pub(super) fn move_to_bin(p: &Path, owner: Owner) -> Binned {
+        if let Err(why) = fits_shell(p) {
+            return Binned::Kept(why.trim_end_matches('.').to_string());
+        }
+        let Some(shell) = shell_path(p) else {
+            return Binned::Kept("Silo can't hand its path to the Recycle Bin".into());
+        };
         // What the Recycle Bin will record, taken while it's still there: its path, kind and size,
         // and what the bin held, so only a new record counts as this move's receipt.
         let (original, meta) = match (std::fs::canonicalize(p), p.symlink_metadata()) {
@@ -260,23 +363,123 @@ mod windows {
             .zip(user_sid())
             .map(|(bin, sid)| bin.join(sid));
         let was = user_bin.as_deref().map(|d| before(&DISK, d));
+        // A folder deleted permanently goes file by file, so one Windows stopped partway is still
+        // there with less in it: what it held tells that from one left as it was.
+        let held = meta.is_dir().then(|| tree_stamp(p));
         // Where it can't recycle, Windows asks before deleting permanently: the user's answer
         // stands ("No" leaves it, and this reports it kept).
-        if let Err(e) = trash::delete(p) {
-            return after_error(p, &e.to_string());
-        }
+        let outcome = shell_delete(&shell, owner);
         match p.symlink_metadata() {
-            Ok(_) => return Binned::Kept("Windows didn't move or delete it".into()),
+            Ok(_) => return still_there(outcome, held.map(|before| (before, tree_stamp(p)))),
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Binned::Unchecked(format!("Silo couldn't check where it is now ({e})"))
             }
             Err(_) => {}
         }
-        gone_outcome(
-            user_bin
-                .zip(was)
-                .map(|(dir, was)| receipt(&DISK, &dir, &was, &original, meta.is_dir(), meta.len())),
-        )
+        let looked = user_bin
+            .zip(was)
+            .map(|(dir, was)| receipt(&DISK, &dir, &was, &original, meta.is_dir(), meta.len()));
+        match outcome {
+            // Gone although the delete failed: only its receipt says it's in the bin.
+            Shell::Failed(e) if looked != Some(Receipt::Found) => after_error(p, &e),
+            _ => gone_outcome(looked),
+        }
+    }
+
+    /// What the shell's delete did.
+    #[derive(Debug)]
+    pub(super) enum Shell {
+        /// It finished: the disk says what became of the item.
+        Done,
+        /// It stopped: the user answered No to (or closed) a prompt Windows showed, or Windows
+        /// stopped by itself (it can, silently, with error pop-ups off).
+        Declined,
+        /// It failed, with the shell's code.
+        Failed(String),
+    }
+
+    /// What to say of an item still at its path after the delete. `folder`: for a folder, what it
+    /// held before and holds now (`None` where it couldn't be read whole): any difference, or not
+    /// knowing, means some of it may be gone.
+    pub(super) fn still_there(
+        outcome: Shell,
+        folder: Option<(Option<StampOf>, Option<StampOf>)>,
+    ) -> Binned {
+        if let Some((before, now)) = folder {
+            if before.is_none() || before != now {
+                return Binned::Kept(
+                    "Windows stopped partway, so some of its files may already be gone (deleted or in the Recycle Bin). Check the folder".into(),
+                );
+            }
+        }
+        match outcome {
+            Shell::Done => Binned::Kept("Windows didn't move or delete it".into()),
+            Shell::Declined => Binned::Declined,
+            Shell::Failed(e) => Binned::Kept(format!("couldn't move it to the Recycle Bin ({e})")),
+        }
+    }
+
+    /// A folder's [`tree_stamp`].
+    type StampOf = (u64, u64);
+
+    /// File Explorer's delete (#442): to the Recycle Bin with undo, and Windows' own prompts where
+    /// Explorer shows them: "permanently delete?" where it can't recycle, and "move to the Recycle
+    /// Bin?" only if the user turned that on. No error pop-ups (Silo says what went wrong) and no
+    /// "create folder?" question. Never `FOF_NOCONFIRMATION`: with it Windows deletes permanently
+    /// without asking, even with `FOF_WANTNUKEWARNING`.
+    pub(super) const DELETE_FLAGS: u32 = windows_sys::Win32::UI::Shell::FOF_ALLOWUNDO
+        | windows_sys::Win32::UI::Shell::FOF_NOERRORUI
+        | windows_sys::Win32::UI::Shell::FOF_NOCONFIRMMKDIR;
+
+    /// Delete `path` (as [`shell_path`] gives it) the way File Explorer does, with its prompts on
+    /// top of `owner`.
+    fn shell_delete(path: &str, owner: Owner) -> Shell {
+        use windows_sys::Win32::System::Com::{
+            CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+        };
+        use windows_sys::Win32::UI::Shell::{SHFileOperationW, FO_DELETE, SHFILEOPSTRUCTW};
+        // The list of paths ends with an empty one: two NULs.
+        let from: Vec<u16> = path.encode_utf16().chain([0, 0]).collect();
+        let mut op = SHFILEOPSTRUCTW {
+            hwnd: owner.unwrap_or(0) as _,
+            wFunc: FO_DELETE,
+            pFrom: from.as_ptr(),
+            pTo: std::ptr::null(),
+            fFlags: DELETE_FLAGS as u16,
+            fAnyOperationsAborted: 0,
+            hNameMappings: std::ptr::null_mut(),
+            lpszProgressTitle: std::ptr::null(),
+        };
+        // The shell's dialogs want a single-threaded apartment. A thread already set up another
+        // way (RPC_E_CHANGED_MODE) is used as it is and left so.
+        // SAFETY: no reserved pointer; balanced by CoUninitialize below when it succeeded.
+        let com = unsafe {
+            CoInitializeEx(
+                std::ptr::null(),
+                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+            )
+        };
+        // SAFETY: `op` and the `from` list it points to live across the call; `from` ends with
+        // two NULs, `pTo` isn't used by a delete.
+        let code = unsafe { SHFileOperationW(&mut op) };
+        if com >= 0 {
+            // SAFETY: CoInitializeEx succeeded on this thread above (S_OK or S_FALSE).
+            unsafe { CoUninitialize() };
+        }
+        let aborted = op.fAnyOperationsAborted != 0;
+        log::info!("shell delete {path:?}: code {code:#x}, stopped: {aborted}");
+        shell_outcome(code, aborted)
+    }
+
+    /// The shell's return `code` and its "stopped" flag as an outcome. A real error code wins over
+    /// the flag (Windows sets it for a silent stop too); ERROR_CANCELLED and the shell's own
+    /// DE_OPCANCELLED, or no code with the flag, are a stop.
+    pub(super) fn shell_outcome(code: i32, aborted: bool) -> Shell {
+        match code {
+            0 if !aborted => Shell::Done,
+            0 | 1223 | 0x75 => Shell::Declined,
+            _ => Shell::Failed(format!("Windows reported error {code:#x}")),
+        }
     }
 
     /// The current user's SID as text (`S-1-5-21-…`): the name of their folder in each drive's
@@ -566,6 +769,151 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn the_shell_gets_a_full_plain_path_or_nothing() {
+        assert_eq!(
+            shell_path(Path::new(r"\\?\F:\Mods\FS25_Foo.zip")).as_deref(),
+            Some(r"F:\Mods\FS25_Foo.zip"),
+            "prefix dropped, letters kept"
+        );
+        assert_eq!(
+            shell_path(Path::new(r"\\?\UNC\nas\games\FS25_Foo.zip")).as_deref(),
+            Some(r"\\nas\games\FS25_Foo.zip")
+        );
+        assert_eq!(
+            shell_path(Path::new(r"\\nas\games\FS25_Foo.zip")).as_deref(),
+            Some(r"\\nas\games\FS25_Foo.zip")
+        );
+        assert_eq!(
+            shell_path(Path::new("F:/Mods/archive/FS25_Foo.zip")).as_deref(),
+            Some(r"F:\Mods\archive\FS25_Foo.zip")
+        );
+        for relative in [
+            "FS25_Foo.zip",
+            r"mods\FS25_Foo.zip",
+            r"\mods\FS25_Foo.zip",
+            "F:FS25_Foo.zip",
+        ] {
+            assert_eq!(shell_path(Path::new(relative)), None, "{relative}");
+        }
+        assert_eq!(
+            shell_path(Path::new(r"F:\Mods\FS25_*.zip")),
+            None,
+            "a wildcard would delete more than the one item"
+        );
+    }
+
+    #[test]
+    fn a_path_longer_than_the_shell_reads_is_refused_before_anything_moves() {
+        // 3 + 256 = 259 characters: the longest the shell's delete reads.
+        let longest = format!(r"F:\{}", "a".repeat(256));
+        assert!(fits_shell(Path::new(&longest)).is_ok());
+        let err = fits_shell(Path::new(&format!("{longest}b"))).unwrap_err();
+        assert!(err.contains("259 characters"), "{err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_with_something_too_deep_inside_is_refused() {
+        let d = temp("deep_inside");
+        // A parent with letters that take more bytes than characters: lengths are in characters
+        // (UTF-16 units), as Windows counts them.
+        let folder = d.join("张三丰 Mods").join("FS25_Deep");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        assert!(fits_shell(&folder).is_ok());
+        let units = |p: &Path| shell_path(p).unwrap().encode_utf16().count();
+        let budget = SHELL_MAX - units(&folder);
+        // folder + `\` + a + `\` + b, two characters over the limit.
+        let deep = folder
+            .join("x".repeat(budget / 2))
+            .join("y".repeat(budget - budget / 2));
+        assert_eq!(units(&deep), SHELL_MAX + 2);
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(fits_shell(&folder).is_err(), "{}", deep.display());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_folder_stamp_changes_when_some_of_it_goes() {
+        let d = temp("stamp");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(d.join("sub/a.dds"), b"1234").unwrap();
+        let before = tree_stamp(&d);
+        assert_eq!(before, Some((3, 14)));
+        assert_eq!(tree_stamp(&d), before, "left as it was");
+        std::fs::remove_file(d.join("sub/a.dds")).unwrap();
+        assert_ne!(tree_stamp(&d), before);
+        assert_eq!(tree_stamp(&d.join("gone")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #442: a real error code is never a "No", and a folder that changed is never "untouched".
+    #[cfg(windows)]
+    #[test]
+    fn what_windows_returned_and_what_is_left_say_what_happened() {
+        use windows::{shell_outcome, still_there, Shell};
+        assert!(matches!(shell_outcome(0, false), Shell::Done));
+        for stopped in [(0, true), (1223, false), (1223, true), (0x75, true)] {
+            assert!(
+                matches!(shell_outcome(stopped.0, stopped.1), Shell::Declined),
+                "{stopped:?}"
+            );
+        }
+        assert!(
+            matches!(shell_outcome(5, true), Shell::Failed(ref e) if e.contains("0x5")),
+            "an error code wins over the stopped flag"
+        );
+
+        let partway = |b: Binned| matches!(b, Binned::Kept(ref m) if m.contains("partway"));
+        // A file, or a folder left exactly as it was: what the delete did.
+        assert_eq!(still_there(Shell::Declined, None), Binned::Declined);
+        assert_eq!(
+            still_there(Shell::Declined, Some((Some((3, 14)), Some((3, 14))))),
+            Binned::Declined
+        );
+        assert!(
+            matches!(still_there(Shell::Done, None), Binned::Kept(ref m) if m.contains("didn't move"))
+        );
+        assert!(
+            matches!(still_there(Shell::Failed("Windows reported error 0x5".into()), None), Binned::Kept(ref m) if m.contains("0x5"))
+        );
+        // A folder with less in it, or one that couldn't be read before or after: maybe partly gone.
+        assert!(partway(still_there(
+            Shell::Declined,
+            Some((Some((3, 14)), Some((2, 10))))
+        )));
+        assert!(partway(still_there(
+            Shell::Failed("x".into()),
+            Some((Some((3, 14)), None))
+        )));
+        assert!(partway(still_there(
+            Shell::Done,
+            Some((None, Some((3, 14))))
+        )));
+    }
+
+    /// #442: with "no confirmation" Windows deletes permanently without asking where it can't
+    /// recycle, so the delete leaves Windows' prompts on, as File Explorer does.
+    #[cfg(windows)]
+    #[test]
+    fn the_delete_keeps_windows_prompts() {
+        use windows_sys::Win32::UI::Shell::{
+            FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
+        };
+        let f = windows::DELETE_FLAGS;
+        assert_ne!(f & FOF_ALLOWUNDO, 0, "to the Recycle Bin");
+        assert_eq!(
+            f & FOF_NOCONFIRMATION,
+            0,
+            "Windows asks before deleting permanently"
+        );
+        assert_ne!(f & FOF_NOERRORUI, 0, "Silo reports errors itself");
+        assert_eq!(f & (FOF_SILENT | FOF_WANTNUKEWARNING), 0);
+        assert!(f <= u16::MAX as u32, "fits the shell's 16-bit flags");
+    }
+
     /// Uses the real Recycle Bin: run by hand with `cargo test --lib recycle -- --ignored`.
     #[test]
     #[ignore]
@@ -575,9 +923,9 @@ mod tests {
         std::fs::write(d.join("FS25_SiloBinTestFolder/modDesc.xml"), b"<modDesc/>").unwrap();
         let f = d.join("FS25_SiloBinTest.zip");
         std::fs::write(&f, b"PK").unwrap();
-        assert_eq!(move_to_bin(&f), Binned::Recycled);
+        assert_eq!(move_to_bin(&f, None), Binned::Recycled);
         assert_eq!(
-            move_to_bin(&d.join("FS25_SiloBinTestFolder")),
+            move_to_bin(&d.join("FS25_SiloBinTestFolder"), None),
             Binned::Recycled
         );
         assert!(!f.exists());
