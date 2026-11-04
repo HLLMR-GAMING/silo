@@ -1260,7 +1260,8 @@ mod tests {
         assert!(fake.asked_by_hash.borrow().is_empty());
         // The catalog said it has no entry of that name: the next run hashes without asking.
         fake.slow_known = std::time::Duration::ZERO;
-        let out = run_with(&conn, &zips, &fake, hash, |_| Ok(()), short);
+        // A full run's time: hashing must not race a 200 ms clock on a slow runner (#450).
+        let out = run_with(&conn, &zips, &fake, hash, |_| Ok(()), Limits::default());
         assert_eq!(out[0].1, Outcome::Linked("cat-0".into()));
         assert_eq!(fake.asked_known.get(), 1, "asked by name once");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1440,6 +1441,15 @@ mod tests {
             out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
             "{out:?}"
         );
+        // The busy database stopped them, not the clock: the first record failed on it, and
+        // the other two weren't tried.
+        let why = |w: &str| {
+            out.iter()
+                .filter(|(_, o)| *o == Outcome::Retry(w.to_string()))
+                .count()
+        };
+        assert_eq!(why(BUDGET_USED), 0, "{out:?}");
+        assert_eq!(why(LIBRARY_BUSY), 2, "{out:?}");
         assert_eq!(locks.get(), 1, "one record tried, then none");
         other.execute_batch("ROLLBACK").unwrap();
         assert!(!zips.iter().any(|z| settled(&conn, z)));
@@ -1641,12 +1651,14 @@ mod tests {
         let (dir, conn) = setup("db_busy");
         let (zips, mut fake) = many(&dir, 3);
         fake.known.insert("FS25_File00".into());
-        // Another connection holds the database's write lock. A write waits at most the run's
-        // time (here 300 ms), once.
+        // Another connection holds the database's write lock. A write waits at most the
+        // database wait (here 300 ms), once; the run has time to spare, so it's the busy
+        // database that stops it, not the clock (#450).
         let other = db::open(&dir.join("silo.db")).unwrap();
         other.execute_batch("BEGIN IMMEDIATE").unwrap();
         let short = Limits {
-            time: std::time::Duration::from_millis(300),
+            time: std::time::Duration::from_secs(10),
+            db_wait: std::time::Duration::from_millis(300),
             ..Limits::default()
         };
         let started = std::time::Instant::now();
@@ -1658,9 +1670,13 @@ mod tests {
             |_| Ok(()),
             short,
         );
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        // One short wait, not the whole budget.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Asked by name, then the busy database (not the clock) stopped it noting the answer.
+        assert_eq!(fake.asked_known.get(), 1, "asked by name once");
         assert!(
-            out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
+            out.iter()
+                .all(|(_, o)| matches!(o, Outcome::Retry(w) if w != BUDGET_USED)),
             "{out:?}"
         );
         assert!(
